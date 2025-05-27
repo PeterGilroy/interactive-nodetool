@@ -68,5 +68,5 @@ The implementation:
 
 ## Notes
 
-This has currently only been test against a local install of Cassanra 5.0.4.
+This has currently only been tested against a local install of Cassanra 5.0.4.
 This is not a wrapper for the native nodetool commands and is performing the underlying JMX calls and formatting the output in a similar way to nodetool. Therefore need to add each nodetool command over time.
