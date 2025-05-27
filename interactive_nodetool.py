@@ -278,6 +278,11 @@ class InteractiveNodetool(cmd2.Cmd):
         except Exception as e:
             print(f"Error getting status: {e}")
 
+    # Shortcut for status
+    def do_s(self, args):
+        """Shortcut for status command."""
+        return self.do_status(args)
+
     def do_info(self, args):
         """Get node information."""
         try:
@@ -388,11 +393,6 @@ class InteractiveNodetool(cmd2.Cmd):
     def do_i(self, args):
         """Shortcut for info command."""
         return self.do_info(args)
-
-    # Shortcut for status
-    def do_s(self, args):
-        """Shortcut for status command."""
-        return self.do_status(args)
 
     def do_compactionstats(self, _):
         """Print statistics about compaction performance."""
@@ -1379,6 +1379,75 @@ class InteractiveNodetool(cmd2.Cmd):
             
         except Exception as e:
             print(f"Error getting table histograms: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+
+    def do_loop(self, args):
+        """Run commands in a loop with wait time between iterations.
+        Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')
+        Example: loop 3 (info status 'wait 2')
+        This will run info and status commands 3 times with 2 second wait between iterations."""
+        try:
+            import time
+            import re
+            from datetime import datetime
+            
+            # Parse the arguments
+            match = re.match(r'(\d+)\s*\((.*)\)', args)
+            if not match:
+                print("Invalid syntax. Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
+                print("Example: loop 3 (info status 'wait 2')")
+                return
+            
+            iterations = int(match.group(1))
+            commands_str = match.group(2).strip()
+            
+            # Parse commands and wait time
+            commands = []
+            wait_time = 0
+            
+            # Split by spaces but respect quotes
+            parts = re.findall(r'\'[^\']*\'|\S+', commands_str)
+            for part in parts:
+                part = part.strip("'")
+                if part.startswith('wait '):
+                    try:
+                        wait_time = float(part.split()[1])
+                    except (IndexError, ValueError):
+                        print("Invalid wait time specified. Using default of 0 seconds.")
+                else:
+                    commands.append(part)
+            
+            # Validate commands exist
+            for cmd in commands:
+                cmd_method = f'do_{cmd}'
+                if not hasattr(self, cmd_method):
+                    print(f"Unknown command: {cmd}")
+                    return
+            
+            try:
+                # Run the commands in a loop
+                for i in range(iterations):
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if i > 0:  # Don't print separator before first iteration
+                        print("\n" + "="*50)
+                    print(f"\n[{timestamp}] Iteration {i+1}/{iterations}\n" + "="*50)
+                    
+                    # Execute each command
+                    for cmd in commands:
+                        cmd_method = getattr(self, f'do_{cmd}')
+                        cmd_method('')  # Pass empty string as argument
+                    
+                    # Wait if this isn't the last iteration
+                    if i < iterations - 1 and wait_time > 0:
+                        time.sleep(wait_time)
+                
+            except KeyboardInterrupt:
+                print("\nLoop interrupted by user")
+                
+        except Exception as e:
+            print(f"Error in loop command: {e}")
             if self.debug:
                 import traceback
                 traceback.print_exc()
