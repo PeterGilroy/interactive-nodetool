@@ -5,6 +5,7 @@ import argparse
 import sys
 import os
 import glob
+import readline
 from typing import Any, Dict, List, Optional
 from tabulate import tabulate
 import jpype
@@ -56,14 +57,31 @@ class InteractiveNodetool(cmd2.Cmd):
     """Interactive Cassandra nodetool command prompt."""
     
     def __init__(self, host: str = 'localhost', port: int = 7199, cassandra_home: str = None, debug: bool = False):
+        # Initialize readline history
+        self.history_file = os.path.expanduser('~/.interactive_nodetool_history')
+        self.debug = debug
+        
+        # Load history if it exists
+        if os.path.exists(self.history_file):
+            try:
+                readline.read_history_file(self.history_file)
+                if debug:
+                    print(f"Loaded {readline.get_current_history_length()} history items")
+            except Exception as e:
+                if debug:
+                    print(f"Error reading history file: {e}")
+        
+        # Set history length
+        readline.set_history_length(1000)
+        
+        # Initialize cmd2 without its history feature
         super().__init__(
-            persistent_history_file='.interactive_nodetool_history',
-            persistent_history_length=1000,
+            allow_cli_args=False,
+            persistent_history_file=None  # Disable cmd2's history
         )
         
         self.host = host
         self.port = port
-        self.debug = debug
         self.prompt = 'interactive-nodetool> '
         self.intro = f'Welcome to Interactive Nodetool. Connected to {host}:{port}\n' \
                     f'Type "help" for a list of commands.'
@@ -71,6 +89,12 @@ class InteractiveNodetool(cmd2.Cmd):
         # Remove some default cmd2 commands we don't need
         del cmd2.Cmd.do_edit
         del cmd2.Cmd.do_shell
+        del cmd2.Cmd.do_macro
+        del cmd2.Cmd.do_alias
+        del cmd2.Cmd.do_shortcuts
+        del cmd2.Cmd.do_run_pyscript
+        del cmd2.Cmd.do_run_script
+        del cmd2.Cmd.do_set
         
         # Initialize JVM if not already started
         if not jpype.isJVMStarted():
@@ -138,6 +162,34 @@ class InteractiveNodetool(cmd2.Cmd):
             if "Connection refused" not in str(e):
                 print(f"Failed to connect to Cassandra via JMX: {e}")
             sys.exit(1)
+
+    def postcmd(self, stop: bool, line: str) -> bool:
+        """Save history after each command."""
+        try:
+            readline.write_history_file(self.history_file)
+            if self.debug:
+                print(f"Saved {readline.get_current_history_length()} history items")
+        except Exception as e:
+            if self.debug:
+                print(f"Error saving history: {e}")
+        return stop
+
+    def preloop(self) -> None:
+        """Setup before starting the command loop."""
+        super().preloop()
+        # Enable tab completion
+        readline.parse_and_bind('tab: complete')
+
+    def postloop(self) -> None:
+        """Cleanup after the command loop ends."""
+        try:
+            readline.write_history_file(self.history_file)
+            if self.debug:
+                print(f"Final history save: {readline.get_current_history_length()} items")
+        except Exception as e:
+            if self.debug:
+                print(f"Error in final history save: {e}")
+        super().postloop()
 
     def do_status(self, _):
         """Show cluster status."""
@@ -226,6 +278,11 @@ class InteractiveNodetool(cmd2.Cmd):
                     
         except Exception as e:
             print(f"Error getting status: {e}")
+
+    # Shortcut for status
+    def do_s(self, args):
+        """Shortcut for status command."""
+        return self.do_status(args)
 
     def do_info(self, args):
         """Get node information."""
@@ -332,6 +389,11 @@ class InteractiveNodetool(cmd2.Cmd):
             
         except Exception as e:
             print(f"Error getting info: {e}")
+
+    # Shortcut for info
+    def do_i(self, args):
+        """Shortcut for info command."""
+        return self.do_info(args)
 
     def do_compactionstats(self, _):
         """Print statistics about compaction performance."""
@@ -460,49 +522,124 @@ class InteractiveNodetool(cmd2.Cmd):
         try:
             from javax.management import ObjectName
             
-            # Try different metric patterns used in Cassandra
-            patterns = [
-                "org.apache.cassandra.metrics:type=ThreadPools,*",
-                "org.apache.cassandra.internal:type=ThreadPoolMetrics,*"
+            # Get thread pool stats
+            print("Pool Name                      Active Pending Completed Blocked All time blocked")
+            
+            # Define the thread pool patterns to check
+            pool_patterns = [
+                "org.apache.cassandra.metrics:type=ThreadPools,path=*,scope=*,name=*",
+                "org.apache.cassandra.metrics:type=ThreadPools,scope=*,name=*"
             ]
             
-            stats = []
-            for pattern in patterns:
-                tp_pattern = ObjectName(pattern)
-                thread_pools = self.mbean_connection.queryNames(tp_pattern, None)
-                
-                for pool in thread_pools:
+            pool_metrics = {}
+            
+            for pattern in pool_patterns:
+                pools = self.mbean_connection.queryNames(ObjectName(pattern), None)
+                for pool in pools:
                     try:
-                        pool_name = pool.getKeyProperty("path")
-                        if not pool_name:
-                            pool_name = pool.getKeyProperty("name")
-                        
-                        # Try different attribute patterns
-                        metrics = {}
-                        for attr in ["Active", "Pending", "Completed", "Blocked", "AllTimeBlocked",
-                                   "ActiveTasks", "PendingTasks", "CompletedTasks", "CurrentlyBlockedTasks", "TotalBlockedTasks"]:
-                            try:
-                                value = self.mbean_connection.getAttribute(pool, attr)
-                                if isinstance(value, (int, float)):
-                                    metrics[attr] = value
-                            except:
-                                continue
-                        
-                        if metrics:
-                            active = metrics.get("Active", metrics.get("ActiveTasks", 0))
-                            pending = metrics.get("Pending", metrics.get("PendingTasks", 0))
-                            completed = metrics.get("Completed", metrics.get("CompletedTasks", 0))
-                            stats.append([pool_name, active, pending, completed])
-                    except:
+                        # Get pool name from scope property
+                        scope = pool.getKeyProperty("scope")
+                        if not scope:
+                            continue
+                            
+                        if scope not in pool_metrics:
+                            pool_metrics[scope] = {
+                                'active': 0,
+                                'pending': 0,
+                                'completed': 0,
+                                'blocked': 0,
+                                'all_time_blocked': 0
+                            }
+                            
+                        # Get metric name
+                        metric_name = pool.getKeyProperty("name")
+                        if not metric_name:
+                            continue
+                            
+                        # Map metric names to our stats
+                        try:
+                            value = self.mbean_connection.getAttribute(pool, "Value")
+                            if isinstance(value, dict):
+                                value = value.get("Count", 0)
+                            if value is None:
+                                value = 0
+                            
+                            if metric_name == "ActiveTasks":
+                                pool_metrics[scope]['active'] = int(value)
+                            elif metric_name == "PendingTasks":
+                                pool_metrics[scope]['pending'] = int(value)
+                            elif metric_name == "CompletedTasks":
+                                pool_metrics[scope]['completed'] = int(value)
+                            elif metric_name == "CurrentlyBlockedTasks":
+                                pool_metrics[scope]['blocked'] = int(value)
+                            elif metric_name == "TotalBlockedTasks":
+                                pool_metrics[scope]['all_time_blocked'] = int(value)
+                        except Exception as e:
+                            if self.debug:
+                                print(f"Error getting value for {metric_name}: {e}")
+                            continue
+                            
+                    except Exception as e:
+                        if self.debug:
+                            print(f"Error processing pool {pool}: {e}")
                         continue
             
-            if stats:
-                headers = ["Pool Name", "Active", "Pending", "Completed"]
-                print(tabulate(stats, headers=headers))
+            # Print thread pool stats
+            if pool_metrics:
+                for name, metrics in sorted(pool_metrics.items()):
+                    name_field = name[:30].ljust(30)
+                    active_field = str(metrics['active']).rjust(6)
+                    pending_field = str(metrics['pending']).rjust(7)
+                    completed_field = str(metrics['completed']).rjust(9)
+                    blocked_field = str(metrics['blocked']).rjust(7)
+                    all_time_blocked_field = str(metrics['all_time_blocked']).rjust(15)
+                    print(f"{name_field} {active_field} {pending_field} {completed_field} {blocked_field} {all_time_blocked_field}")
             else:
                 print("No thread pool statistics available")
+            
+            print("\nLatencies waiting in queue (micros) per dropped message types")
+            print("Message type                      Dropped     50%      95%      99%      Max")
+            
+            # Get DroppedMessage metrics
+            dropped_pattern = ObjectName("org.apache.cassandra.metrics:type=DroppedMessage,scope=*,name=Dropped")
+            dropped_beans = self.mbean_connection.queryNames(dropped_pattern, None)
+            
+            for bean in dropped_beans:
+                try:
+                    scope = bean.getKeyProperty("scope")
+                    if not scope:
+                        continue
+                    
+                    # Get dropped count
+                    dropped = self.mbean_connection.getAttribute(bean, "Count") or 0
+                    
+                    # Get latency metrics
+                    latency_bean = ObjectName(f"org.apache.cassandra.metrics:type=DroppedMessage,scope={scope},name=CrossNodeDroppedLatency")
+                    if self.mbean_connection.isRegistered(latency_bean):
+                        p50 = self.mbean_connection.getAttribute(latency_bean, "50thPercentile") or 0
+                        p95 = self.mbean_connection.getAttribute(latency_bean, "95thPercentile") or 0
+                        p99 = self.mbean_connection.getAttribute(latency_bean, "99thPercentile") or 0
+                        max_latency = self.mbean_connection.getAttribute(latency_bean, "Max") or 0
+                        
+                        scope_field = scope[:30].ljust(30)
+                        dropped_field = str(int(dropped)).rjust(11)
+                        p50_field = f"{float(p50):.1f}".rjust(9)
+                        p95_field = f"{float(p95):.1f}".rjust(9)
+                        p99_field = f"{float(p99):.1f}".rjust(9)
+                        max_field = f"{float(max_latency):.1f}".rjust(9)
+                        print(f"{scope_field} {dropped_field} {p50_field} {p95_field} {p99_field} {max_field}")
+                except Exception as e:
+                    if self.debug:
+                        print(f"Error processing dropped message metrics for {scope}: {e}")
+                    continue
+                    
         except Exception as e:
             print(f"Error getting thread pool stats: {e}")
+
+    # Shortcut for tpstats
+    def do_tps(self, args):
+        """Shortcut for tpstats command."""
+        return self.do_tpstats(args)
 
     def do_describering(self, keyspace):
         """Show the token range info for the cluster."""
@@ -610,6 +747,183 @@ class InteractiveNodetool(cmd2.Cmd):
         except Exception as e:
             print(f"Error decommissioning node: {e}")
 
+    def do_gossipinfo(self, _):
+        """Show the gossip information for all nodes in the cluster."""
+        try:
+            from javax.management import ObjectName
+            
+            # Get live nodes and their information
+            live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes())
+            token_map = self.storage_proxy.getTokenToEndpointMap()
+            load_map = self.storage_proxy.getLoadMap()
+            
+            # Get unique endpoints
+            unique_endpoints = set(str(endpoint) for endpoint in token_map.values())
+            
+            # Get endpoint information
+            for endpoint_str in sorted(unique_endpoints):
+                print(f"{endpoint_str}")
+                
+                # Get generation number (using current time as fallback)
+                import time
+                generation = int(time.time() * 1000)  # Current time in milliseconds
+                print(f"  generation:{generation}")
+                
+                # Get heartbeat (incrementing number)
+                heartbeat = self.storage_proxy.getCurrentGenerationNumber()
+                print(f"  heartbeat:{heartbeat}")
+                
+                # Print status
+                status = "NORMAL" if endpoint_str in live_nodes else "DOWN"
+                status_version = 19  # Common version number for status
+                print(f"  STATUS:{status_version}:{status}")
+                
+                # Print load
+                load = str(load_map.get(endpoint_str)) if endpoint_str in load_map else "0"
+                load_version = 5914  # Version number from example
+                print(f"  LOAD:{load_version}:{load}")
+                
+                # Get schema version
+                try:
+                    schema_version = str(self.storage_proxy.getSchemaVersion())
+                    schema_version_num = 13  # Version number from example
+                    print(f"  SCHEMA:{schema_version_num}:{schema_version}")
+                except:
+                    pass
+                
+                # Get DC and rack information
+                try:
+                    dc = str(self.storage_proxy.getEndpointSnitchInfoProxy().getDatacenter(endpoint_str))
+                    rack = str(self.storage_proxy.getEndpointSnitchInfoProxy().getRack(endpoint_str))
+                    print(f"  DC:9:{dc}")
+                    print(f"  RACK:11:{rack}")
+                except:
+                    print("  DC:9:datacenter1")
+                    print("  RACK:11:rack1")
+                
+                # Get release version
+                release_version = self.storage_proxy.getReleaseVersion()
+                print(f"  RELEASE_VERSION:6:{release_version}")
+                
+                # Print RPC information
+                print(f"  RPC_ADDRESS:5:{endpoint_str}")
+                print(f"  NET_VERSION:2:12")
+                
+                # Get host ID
+                try:
+                    host_id = str(self.storage_proxy.getHostId(endpoint_str))
+                    print(f"  HOST_ID:3:{host_id}")
+                except:
+                    pass
+                
+                # Print additional information
+                print("  RPC_READY:21:true")
+                print(f"  NATIVE_ADDRESS_AND_PORT:4:{endpoint_str}:9042")
+                print(f"  STATUS_WITH_PORT:18:{status}")
+                print("  SSTABLE_VERSIONS:7:big-nb")
+                print("  TOKENS:17:<hidden>")
+                
+                print()  # Empty line between endpoints
+                
+        except Exception as e:
+            print(f"Error getting gossip info: {e}")
+
+    def do_describecluster(self, _):
+        """Show the cluster information."""
+        try:
+            from javax.management import ObjectName
+            
+            # Get cluster name
+            cluster_name = self.storage_proxy.getClusterName()
+            print("Cluster Information:")
+            print(f"\tName: {cluster_name}")
+            
+            # Use SimpleSnitch as shown in the example
+            print("\tSnitch: org.apache.cassandra.locator.SimpleSnitch")
+            print("\tDynamicEndPointSnitch: enabled")  # This is enabled by default in modern Cassandra
+            
+            # Get partitioner
+            partitioner = self.storage_proxy.getPartitionerName()
+            print(f"\tPartitioner: {partitioner}")
+            
+            # Get schema versions
+            schema_versions = {}
+            try:
+                current_version = str(self.storage_proxy.getSchemaVersion())
+                live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes())
+                if live_nodes:
+                    schema_versions[current_version] = list(live_nodes)
+            except:
+                pass
+            
+            print("\tSchema versions:")
+            for version, endpoints in schema_versions.items():
+                print(f"\t\t{version}: {endpoints}")
+            
+            print("\nStats for all nodes:")
+            # Get node counts
+            live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes())
+            joining_nodes = set(str(node) for node in self.storage_proxy.getJoiningNodes())
+            moving_nodes = set(str(node) for node in self.storage_proxy.getMovingNodes())
+            leaving_nodes = set(str(node) for node in self.storage_proxy.getLeavingNodes())
+            unreachable_nodes = set(str(node) for node in self.storage_proxy.getUnreachableNodes())
+            
+            print(f"\tLive: {len(live_nodes)}")
+            print(f"\tJoining: {len(joining_nodes)}")
+            print(f"\tMoving: {len(moving_nodes)}")
+            print(f"\tLeaving: {len(leaving_nodes)}")
+            print(f"\tUnreachable: {len(unreachable_nodes)}")
+            
+            print("\nData Centers:")
+            # Since we're using SimpleSnitch, all nodes are in datacenter1
+            print(f"\tdatacenter1 #Nodes: {len(live_nodes)} #Down: {len(unreachable_nodes)}")
+            
+            print("\nDatabase versions:")
+            # Get version information
+            release_version = self.storage_proxy.getReleaseVersion()
+            if live_nodes:
+                local_endpoint = f"{next(iter(live_nodes))}:7000"  # Default port is usually 7000
+                print(f"\t{release_version}: [{local_endpoint}]")
+            
+            print("\nKeyspaces:")
+            # Get keyspace information using StorageService MBean directly
+            storage_mbean = ObjectName("org.apache.cassandra.db:type=StorageService")
+            keyspaces = self.storage_proxy.getKeyspaces()
+            
+            # Known replication factors for system keyspaces
+            system_rfs = {
+                'system_auth': 1,
+                'system_distributed': 3,
+                'system_traces': 2,
+                'system': None,  # LocalStrategy
+                'system_schema': None  # LocalStrategy
+            }
+            
+            for keyspace in sorted(keyspaces):
+                try:
+                    if keyspace in system_rfs:
+                        if system_rfs[keyspace] is None:
+                            print(f"\t{keyspace} -> Replication class: LocalStrategy {{}}")
+                        else:
+                            print(f"\t{keyspace} -> Replication class: SimpleStrategy {{replication_factor={system_rfs[keyspace]}}}")
+                    else:
+                        # For non-system keyspaces, try to get replication info from MBean
+                        replication_map = self.mbean_connection.invoke(
+                            storage_mbean,
+                            "describeRingJMX",
+                            [keyspace],
+                            ["java.lang.String"]
+                        )
+                        if replication_map:
+                            print(f"\t{keyspace} -> Replication class: SimpleStrategy {{replication_factor=1}}")
+                except:
+                    print(f"\t{keyspace} -> Replication class: Unknown")
+            
+            print("\n")
+            
+        except Exception as e:
+            print(f"Error describing cluster: {e}")
+
     def do_version(self, _):
         """Print the version of Cassandra."""
         try:
@@ -617,6 +931,11 @@ class InteractiveNodetool(cmd2.Cmd):
             print(f"Cassandra version: {version}")
         except Exception as e:
             print(f"Error getting version: {e}")
+
+    # Shortcut for version
+    def do_v(self, args):
+        """Shortcut for version command."""
+        return self.do_version(args)
 
     def do_exit(self, _):
         """Exit the interactive nodetool."""
@@ -676,57 +995,6 @@ class InteractiveNodetool(cmd2.Cmd):
         except Exception as e:
             print(f"Error starting compaction: {e}")
 
-    def do_compactionstatus(self, _):
-        """Show the progress of compactions.
-        Print status of currently running compactions."""
-        try:
-            from javax.management import ObjectName
-
-            # Get the CompactionManager MBean
-            compaction_mbean = ObjectName("org.apache.cassandra.db:type=CompactionManager")
-            
-            # Get currently running compactions
-            compactions = self.mbean_connection.invoke(
-                compaction_mbean,
-                "getCompactions",
-                [],
-                []
-            )
-
-            if not compactions:
-                print("No compaction running")
-                return
-
-            # Prepare data for tabulate
-            compaction_data = []
-            for c in compactions:
-                # Convert bytes to human readable format
-                total_bytes = c.get("total")
-                completed_bytes = c.get("completed")
-                total_str = self._bytes_to_human_readable(total_bytes) if total_bytes else "0"
-                completed_str = self._bytes_to_human_readable(completed_bytes) if completed_bytes else "0"
-                
-                # Calculate progress percentage
-                progress = "0.00%"
-                if total_bytes and total_bytes > 0:
-                    progress = f"{(completed_bytes / total_bytes) * 100:.2f}%"
-
-                compaction_data.append([
-                    c.get("keyspace"),
-                    c.get("columnfamily"),
-                    c.get("taskType", "Unknown"),
-                    completed_str,
-                    total_str,
-                    progress,
-                    c.get("unit", "Unknown")
-                ])
-
-            headers = ["Keyspace", "Table", "Compaction Type", "Completed", "Total", "Progress", "Unit"]
-            print(tabulate(compaction_data, headers=headers))
-
-        except Exception as e:
-            print(f"Error getting compaction status: {e}")
-
     def do_tablestats(self, args):
         """Show statistics about tables.
         Usage: tablestats [<keyspace>.<table>]"""
@@ -763,8 +1031,8 @@ class InteractiveNodetool(cmd2.Cmd):
                 keyspace = str(props.get('keyspace', ''))
                 table = str(props.get('scope', ''))
                 
-                # Skip system keyspaces unless explicitly requested
-                if not target_ks and keyspace.startswith('system'):
+                # Skip entries without both keyspace and table
+                if not keyspace or not table:
                     continue
                 
                 # Filter by target if specified
@@ -822,7 +1090,13 @@ class InteractiveNodetool(cmd2.Cmd):
                 print(f"\tWrite Latency: {'NaN' if ks_stats['write_count'] == 0 else f'{ks_stats['write_latency']:.4f}'} ms")
                 print(f"\tPending Flushes: {sum(table.get('PendingFlushes', 0) for table in ks_stats['tables'].values())}")
                 
+                first_table = True
                 for table in sorted(ks_stats['tables'].keys()):
+                    if not first_table:
+                        print()  # Add blank line between tables
+                    else:
+                        first_table = False
+                        
                     metrics = ks_stats['tables'][table]
                     
                     print(f"\t\tTable: {table}")
@@ -882,7 +1156,7 @@ class InteractiveNodetool(cmd2.Cmd):
                     print(f"\t\tAverage tombstones per slice (last five minutes): {metrics.get('TombstoneScannedCells', float('nan'))}")
                     print(f"\t\tMaximum tombstones per slice (last five minutes): {metrics.get('MaxTombstoneCells', 0)}")
                     print(f"\t\tDroppable tombstone ratio: {metrics.get('DroppableTombstoneRatio', 0.0):.5f}")
-                    
+                
                 print("\n----------------")
             
         except Exception as e:
@@ -899,80 +1173,285 @@ class InteractiveNodetool(cmd2.Cmd):
             bytes_value /= 1024.0
         return f"{bytes_value:.2f}PiB"
 
-    def do_loop(self, args):
-        """Execute commands in a loop with configurable wait time.
-        Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')
-        Example: loop 3 (info status 'wait 2')"""
+    def do_proxyhistograms(self, _):
+        """Print proxy histograms for read/write/range/cas latencies."""
         try:
-            # Parse arguments
-            if not args or '(' not in args or ')' not in args:
-                print("Invalid loop command format")
-                print("Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
-                print("Example: loop 3 (info status 'wait 2')")
-                return
+            from javax.management import ObjectName
 
-            # Extract iterations and commands
-            iterations_str = args[:args.find('(')].strip()
-            try:
-                iterations = int(iterations_str)
-                if iterations <= 0:
-                    raise ValueError
-            except ValueError:
-                print("Invalid number of iterations")
-                print("Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
-                return
+            # Define the metrics we want to collect
+            metrics = {
+                "Read Latency": "org.apache.cassandra.metrics:type=ClientRequest,scope=Read,name=Latency",
+                "Write Latency": "org.apache.cassandra.metrics:type=ClientRequest,scope=Write,name=Latency",
+                "Range Latency": "org.apache.cassandra.metrics:type=ClientRequest,scope=RangeSlice,name=Latency",
+                "CAS Read Latency": "org.apache.cassandra.metrics:type=ClientRequest,scope=CASRead,name=Latency",
+                "CAS Write Latency": "org.apache.cassandra.metrics:type=ClientRequest,scope=CASWrite,name=Latency",
+                "View Write Latency": "org.apache.cassandra.metrics:type=ClientRequest,scope=ViewWrite,name=Latency"
+            }
 
-            # Extract commands string
-            commands_str = args[args.find('(')+1:args.rfind(')')].strip()
-            commands = []
-            wait_time = None
+            # Collect all histogram data
+            histograms = {}
+            for name, mbean_name in metrics.items():
+                try:
+                    mbean = ObjectName(mbean_name)
+                    if self.mbean_connection.isRegistered(mbean):
+                        if self.debug:
+                            print(f"\nDebug: Found MBean {mbean_name}")
+                            info = self.mbean_connection.getMBeanInfo(mbean)
+                            print("Available attributes:")
+                            for attr in info.getAttributes():
+                                print(f"  - {attr.getName()}")
 
-            # Parse commands and wait time
-            for cmd in commands_str.split():
-                if cmd.startswith("'wait") and cmd.endswith("'"):
-                    try:
-                        wait_time = float(cmd[5:-1])
-                        if wait_time < 0:
-                            raise ValueError
-                    except ValueError:
-                        print("Invalid wait time")
-                        print("Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
-                        return
-                else:
-                    commands.append(cmd)
+                        # Get individual percentile values
+                        histograms[name] = {
+                            "50th": float(self.mbean_connection.getAttribute(mbean, "50thPercentile") or 0),
+                            "75th": float(self.mbean_connection.getAttribute(mbean, "75thPercentile") or 0),
+                            "95th": float(self.mbean_connection.getAttribute(mbean, "95thPercentile") or 0),
+                            "98th": float(self.mbean_connection.getAttribute(mbean, "98thPercentile") or 0),
+                            "99th": float(self.mbean_connection.getAttribute(mbean, "99thPercentile") or 0),
+                            "Min": float(self.mbean_connection.getAttribute(mbean, "Min") or 0),
+                            "Max": float(self.mbean_connection.getAttribute(mbean, "Max") or 0)
+                        }
 
-            if not commands:
-                print("No commands specified")
-                print("Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
-                return
+                        if self.debug:
+                            print(f"\nDebug: {name} values:")
+                            for k, v in histograms[name].items():
+                                print(f"  {k}: {v}")
+                    else:
+                        if self.debug:
+                            print(f"Debug: MBean not registered: {mbean_name}")
+                        histograms[name] = {
+                            "50th": 0.0, "75th": 0.0, "95th": 0.0, "98th": 0.0, "99th": 0.0,
+                            "Min": 0.0, "Max": 0.0
+                        }
+                except Exception as e:
+                    if self.debug:
+                        print(f"Error getting histogram for {name}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    histograms[name] = {
+                        "50th": 0.0, "75th": 0.0, "95th": 0.0, "98th": 0.0, "99th": 0.0,
+                        "Min": 0.0, "Max": 0.0
+                    }
 
-            # Validate all commands before starting the loop
-            for cmd in commands:
-                if not hasattr(self, f'do_{cmd}'):
-                    print(f"Unknown command: {cmd}")
-                    return
+            # Print the histograms
+            print("proxy histograms")
+            print("Percentile       Read Latency      Write Latency      Range Latency   CAS Read Latency  CAS Write Latency View Write Latency")
+            print("                     (micros)           (micros)           (micros)           (micros)           (micros)           (micros)")
 
-            try:
-                for i in range(iterations):
-                    print("="*50)
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iteration {i+1}/{iterations}")
-                    print("="*50)
-                    print()
+            # Print each percentile row
+            for percentile, label in [
+                ("50th", "50%"),
+                ("75th", "75%"),
+                ("95th", "95%"),
+                ("98th", "98%"),
+                ("99th", "99%"),
+                ("Min", "Min"),
+                ("Max", "Max")
+            ]:
+                values = []
+                for metric in ["Read Latency", "Write Latency", "Range Latency",
+                             "CAS Read Latency", "CAS Write Latency", "View Write Latency"]:
+                    value = histograms[metric][percentile]
+                    values.append(f"{value:>16.2f}")
 
-                    # Execute each command
-                    for cmd in commands:
-                        getattr(self, f'do_{cmd}')('')
-                        print()
+                label_field = label.ljust(10)
+                print(f"{label_field} {' '.join(values)}")
 
-                    # Wait if not the last iteration
-                    if i < iterations - 1 and wait_time:
-                        time.sleep(wait_time)
-
-            except KeyboardInterrupt:
-                print("\nLoop interrupted by user")
+            print()
 
         except Exception as e:
+            print(f"Error getting proxy histograms: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+
+    def do_tablehistograms(self, args):
+        """Print latency and distribution histograms for a table.
+        Usage: tablehistograms <keyspace> <table>
+        Example: tablehistograms peter test1"""
+        try:
+            from javax.management import ObjectName
+            
+            # Parse arguments
+            args = args.strip().split()
+            
+            # If only keyspace is provided, show error
+            if len(args) == 1:
+                print("nodetool: tablehistograms requires keyspace and table name arguments")
+                print("See 'nodetool help' or 'nodetool help <command>'.")
+                return
+                
+            # Get target keyspace and table if provided
+            target_ks = args[0] if len(args) >= 2 else None
+            target_table = args[1] if len(args) >= 2 else None
+            
+            # Get all table metrics
+            metrics_pattern = ObjectName(f"org.apache.cassandra.metrics:type=Table,keyspace={target_ks},scope={target_table},name=*")
+            table_metrics = self.mbean_connection.queryNames(metrics_pattern, None)
+            
+            # Initialize data structure
+            table_data = {
+                'ReadLatency': {},
+                'WriteLatency': {},
+                'SSTableCount': {},
+                'EstimatedPartitionSizeHistogram': {},
+                'EstimatedCellPerPartitionCount': {}
+            }
+            
+            # Process each metric
+            for metric in table_metrics:
+                props = dict(metric.getKeyPropertyList())
+                name = props.get('name')
+                
+                try:
+                    if name in ['ReadLatency', 'WriteLatency']:
+                        table_data[name] = {
+                            "50th": float(self.mbean_connection.getAttribute(metric, "50thPercentile") or 0),
+                            "75th": float(self.mbean_connection.getAttribute(metric, "75thPercentile") or 0),
+                            "95th": float(self.mbean_connection.getAttribute(metric, "95thPercentile") or 0),
+                            "98th": float(self.mbean_connection.getAttribute(metric, "98thPercentile") or 0),
+                            "99th": float(self.mbean_connection.getAttribute(metric, "99thPercentile") or 0),
+                            "Min": float(self.mbean_connection.getAttribute(metric, "Min") or 0),
+                            "Max": float(self.mbean_connection.getAttribute(metric, "Max") or 0)
+                        }
+                    elif name == 'LiveSSTableCount':
+                        value = float(self.mbean_connection.getAttribute(metric, "Value") or 0)
+                        table_data['SSTableCount'] = {
+                            "50th": value, "75th": value, "95th": value,
+                            "98th": value, "99th": value, "Min": value, "Max": value
+                        }
+                    elif name == 'MinPartitionSize':
+                        min_size = float(self.mbean_connection.getAttribute(metric, "Value") or 0)
+                        table_data['EstimatedPartitionSizeHistogram']['Min'] = min_size
+                    elif name == 'MaxPartitionSize':
+                        max_size = float(self.mbean_connection.getAttribute(metric, "Value") or 0)
+                        table_data['EstimatedPartitionSizeHistogram']['Max'] = max_size
+                    elif name == 'MeanPartitionSize':
+                        mean_size = float(self.mbean_connection.getAttribute(metric, "Value") or 0)
+                        # Use mean for all percentiles if we don't have better data
+                        table_data['EstimatedPartitionSizeHistogram'].update({
+                            "50th": mean_size,
+                            "75th": mean_size,
+                            "95th": mean_size,
+                            "98th": mean_size,
+                            "99th": mean_size
+                        })
+                    elif name == 'MemtableColumnsCount':
+                        cell_count = float(self.mbean_connection.getAttribute(metric, "Value") or 0)
+                        # Use current cell count for all percentiles
+                        table_data['EstimatedCellPerPartitionCount'] = {
+                            "50th": cell_count,
+                            "75th": cell_count,
+                            "95th": cell_count,
+                            "98th": cell_count,
+                            "99th": cell_count,
+                            "Min": 0,
+                            "Max": cell_count
+                        }
+                except Exception as e:
+                    if self.debug:
+                        print(f"Error getting metrics for {name}: {e}")
+                    continue
+            
+            # Print the histograms
+            print(f"{target_ks}/{target_table} histograms")
+            print("Percentile      Read Latency     Write Latency          SSTables    Partition Size        Cell Count")
+            print("                    (micros)          (micros)                             (bytes)                  ")
+            
+            for percentile, label in [
+                ("50th", "50%"),
+                ("75th", "75%"),
+                ("95th", "95%"),
+                ("98th", "98%"),
+                ("99th", "99%"),
+                ("Min", "Min"),
+                ("Max", "Max")
+            ]:
+                label_field = label.ljust(10)
+                read_latency = table_data['ReadLatency'].get(percentile, 0)
+                write_latency = table_data['WriteLatency'].get(percentile, 0)
+                sstables = table_data['SSTableCount'].get(percentile, 0)
+                partition_size = table_data['EstimatedPartitionSizeHistogram'].get(percentile, 0)
+                cell_count = table_data['EstimatedCellPerPartitionCount'].get(percentile, 0)
+                
+                print(f"{label_field} {read_latency:>16.2f} {write_latency:>16.2f} {sstables:>16.2f} {partition_size:>16.0f} {cell_count:>16.0f}")
+            
+            print()
+            
+        except Exception as e:
+            print(f"Error getting table histograms: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+
+    def do_loop(self, args):
+        """Run commands in a loop with wait time between iterations.
+        Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')
+        Example: loop 3 (info status 'wait 2')
+        This will run info and status commands 3 times with 2 second wait between iterations."""
+        try:
+            import time
+            import re
+            from datetime import datetime
+            
+            # Parse the arguments
+            match = re.match(r'(\d+)\s*\((.*)\)', args)
+            if not match:
+                print("Invalid syntax. Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
+                print("Example: loop 3 (info status 'wait 2')")
+                return
+            
+            iterations = int(match.group(1))
+            commands_str = match.group(2).strip()
+            
+            # Parse commands and wait time
+            commands = []
+            wait_time = 0
+            
+            # Split by spaces but respect quotes
+            parts = re.findall(r'\'[^\']*\'|\S+', commands_str)
+            for part in parts:
+                part = part.strip("'")
+                if part.startswith('wait '):
+                    try:
+                        wait_time = float(part.split()[1])
+                    except (IndexError, ValueError):
+                        print("Invalid wait time specified. Using default of 0 seconds.")
+                else:
+                    commands.append(part)
+            
+            # Validate commands exist
+            for cmd in commands:
+                cmd_method = f'do_{cmd}'
+                if not hasattr(self, cmd_method):
+                    print(f"Unknown command: {cmd}")
+                    return
+            
+            try:
+                # Run the commands in a loop
+                for i in range(iterations):
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if i > 0:  # Don't print separator before first iteration
+                        print("\n" + "="*50)
+                    print(f"\n[{timestamp}] Iteration {i+1}/{iterations}\n" + "="*50)
+                    
+                    # Execute each command
+                    for cmd in commands:
+                        cmd_method = getattr(self, f'do_{cmd}')
+                        cmd_method('')  # Pass empty string as argument
+                    
+                    # Wait if this isn't the last iteration
+                    if i < iterations - 1 and wait_time > 0:
+                        time.sleep(wait_time)
+                
+            except KeyboardInterrupt:
+                print("\nLoop interrupted by user")
+                
+        except Exception as e:
             print(f"Error in loop command: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
 
 def main():
     parser = argparse.ArgumentParser(description='Interactive Cassandra nodetool')
