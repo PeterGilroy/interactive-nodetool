@@ -1431,18 +1431,25 @@ class InteractiveNodetool(cmd2.Cmd):
                 for i in range(iterations):
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     if i > 0:  # Don't print separator before first iteration
-                        print("\n" + "="*50)
-                    print(f"\n[{timestamp}] Iteration {i+1}/{iterations}\n" + "="*50)
+                        print("\n")
+                    print("="*50)
+                    print(f"[{timestamp}] Iteration {i+1}/{iterations}")
+                    print("="*50 + "\n")
                     
                     # Execute each command
-                    for cmd in commands:
+                    for j, cmd in enumerate(commands):
+                        print(f"Running command: {cmd}")
+                        print("-" * 20)
                         cmd_method = getattr(self, f'do_{cmd}')
                         cmd_method('')  # Pass empty string as argument
+                        # Add a line break between commands, but not after the last command
+                        if j < len(commands) - 1:
+                            print()
                     
                     # Wait if this isn't the last iteration
                     if i < iterations - 1 and wait_time > 0:
                         time.sleep(wait_time)
-                
+            
             except KeyboardInterrupt:
                 print("\nLoop interrupted by user")
                 
