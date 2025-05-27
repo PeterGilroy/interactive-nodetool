@@ -12,6 +12,7 @@ import jpype
 import jpype.imports
 from jpype.types import *
 from datetime import datetime
+import time
 
 def find_cassandra_jars(cassandra_home: str, debug: bool = False) -> List[str]:
     """Find all necessary Cassandra JAR files."""
