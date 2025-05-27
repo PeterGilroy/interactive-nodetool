@@ -12,6 +12,7 @@ An interactive command-line interface for Apache Cassandra's nodetool functional
 - Single JVM instance for all operations
 - Efficient command execution
 - Command looping with configurable wait times
+- Direct command execution from command line
 
 ## Installation
 
@@ -31,6 +32,20 @@ An interactive command-line interface for Apache Cassandra's nodetool functional
 Run the interactive shell:
 ```bash
 python interactive_nodetool.py [--host HOST] [--port PORT] [--cassandra-home CASSANDRA_HOME]
+```
+
+Execute commands directly:
+```bash
+# Execute a command and exit
+python interactive_nodetool.py -c "status"
+python interactive_nodetool.py --command "info"
+
+# Execute a command and enter interactive mode
+python interactive_nodetool.py -C "status"
+python interactive_nodetool.py --interactivecommand "info"
+
+# Commands with arguments are also supported
+python interactive_nodetool.py -c "loop 3 (info 'wait 2')"
 ```
 
 Once in the shell, you can run nodetool commands directly without the "nodetool" prefix:
