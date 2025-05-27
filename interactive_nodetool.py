@@ -939,7 +939,6 @@ class InteractiveNodetool(cmd2.Cmd):
 
     def do_exit(self, _):
         """Exit the interactive nodetool."""
-        print("Goodbye!")
         try:
             if hasattr(self, 'jmx_connector'):
                 try:
@@ -1470,15 +1469,53 @@ def main():
                       help='Cassandra installation directory (default: $CASSANDRA_HOME)')
     parser.add_argument('-d', '--debug', action='store_true',
                       help='Enable debug output')
+    parser.add_argument('-c', '--command',
+                      help='Execute a single command and exit')
+    parser.add_argument('-C', '--interactivecommand',
+                      help='Execute a command and stay at the prompt')
     
-    # Parse only the known args and remove them from sys.argv
-    args, unknown = parser.parse_known_args()
-    sys.argv = [sys.argv[0]] + unknown  # Reset sys.argv to only unknown args
+    args = parser.parse_args()
     
-    app = InteractiveNodetool(host=args.host, port=args.port, 
-                            cassandra_home=args.cassandra_home, 
-                            debug=args.debug)
-    app.cmdloop()
+    try:
+        app = InteractiveNodetool(host=args.host, port=args.port, 
+                                cassandra_home=args.cassandra_home, 
+                                debug=args.debug)
+        
+        def execute_command(cmd_string):
+            # Split only on the first space to separate command from arguments
+            parts = cmd_string.strip().split(None, 1)
+            cmd = parts[0]
+            cmd_args = parts[1] if len(parts) > 1 else ''
+            
+            cmd_method = f'do_{cmd}'
+            if hasattr(app, cmd_method):
+                getattr(app, cmd_method)(cmd_args)
+                return True
+            return False
+        
+        # Handle direct command execution
+        if args.command:
+            # Execute the command and exit
+            if not execute_command(args.command):
+                print(f"Unknown command: {args.command.split()[0]}")
+                sys.exit(1)
+            app.do_exit('')  # Clean exit after command execution
+        elif args.interactivecommand:
+            # Execute the command and stay at prompt
+            if not execute_command(args.interactivecommand):
+                print(f"Unknown command: {args.interactivecommand.split()[0]}")
+                sys.exit(1)
+            app.cmdloop()  # Continue to interactive mode
+        else:
+            # Regular interactive mode
+            app.cmdloop()
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        if args.debug:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == '__main__':
     main() 
