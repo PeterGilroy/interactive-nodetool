@@ -64,4 +64,9 @@ The implementation:
 1. Starts a JVM using JPype
 2. Establishes a JMX connection to Cassandra
 3. Uses Cassandra's MBeans directly for operations
-4. Maintains the JVM and connection throughout the session 
+4. Maintains the JVM and connection throughout the session
+
+## Notes
+
+This has currently only been test against a local install of Cassanra 5.0.4.
+This is not a wrapper for the native nodetool commands and is performing the underlying JMX calls and formatting the output in a similar way to nodetool. Therefore need to add each nodetool command over time.
