@@ -11,6 +11,7 @@ An interactive command-line interface for Apache Cassandra's nodetool functional
 - Direct JMX connection to Cassandra nodes (no subprocess calls)
 - Single JVM instance for all operations
 - Efficient command execution
+- Command looping with configurable wait times
 
 ## Installation
 
@@ -39,6 +40,28 @@ interactive-nodetool> status
 interactive-nodetool> info
 interactive-nodetool> help
 ```
+
+### Command Looping
+
+You can run commands in a loop with a configurable wait time between iterations using the `loop` command:
+
+```
+loop <iterations> (<command1> <command2> ... 'wait <seconds>')
+```
+
+Examples:
+```
+# Run info and status 3 times with 2 second wait between iterations
+interactive-nodetool> loop 3 (info status 'wait 2')
+
+# Monitor compaction status every 5 seconds, 10 times
+interactive-nodetool> loop 10 (compactionstatus 'wait 5')
+
+# Check node status every second, 60 times (1 minute monitoring)
+interactive-nodetool> loop 60 (status 'wait 1')
+```
+
+Each iteration will be timestamped and separated by clear markers for easy reading. You can interrupt the loop at any time using Ctrl+C.
 
 ## Configuration
 

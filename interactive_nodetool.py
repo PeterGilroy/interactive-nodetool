@@ -11,6 +11,7 @@ import jpype
 import jpype.imports
 from jpype.types import *
 from datetime import datetime
+import time
 
 def find_cassandra_jars(cassandra_home: str, debug: bool = False) -> List[str]:
     """Find all necessary Cassandra JAR files."""
@@ -897,6 +898,81 @@ class InteractiveNodetool(cmd2.Cmd):
                 return f"{bytes_value:.2f}{unit}"
             bytes_value /= 1024.0
         return f"{bytes_value:.2f}PiB"
+
+    def do_loop(self, args):
+        """Execute commands in a loop with configurable wait time.
+        Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')
+        Example: loop 3 (info status 'wait 2')"""
+        try:
+            # Parse arguments
+            if not args or '(' not in args or ')' not in args:
+                print("Invalid loop command format")
+                print("Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
+                print("Example: loop 3 (info status 'wait 2')")
+                return
+
+            # Extract iterations and commands
+            iterations_str = args[:args.find('(')].strip()
+            try:
+                iterations = int(iterations_str)
+                if iterations <= 0:
+                    raise ValueError
+            except ValueError:
+                print("Invalid number of iterations")
+                print("Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
+                return
+
+            # Extract commands string
+            commands_str = args[args.find('(')+1:args.rfind(')')].strip()
+            commands = []
+            wait_time = None
+
+            # Parse commands and wait time
+            for cmd in commands_str.split():
+                if cmd.startswith("'wait") and cmd.endswith("'"):
+                    try:
+                        wait_time = float(cmd[5:-1])
+                        if wait_time < 0:
+                            raise ValueError
+                    except ValueError:
+                        print("Invalid wait time")
+                        print("Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
+                        return
+                else:
+                    commands.append(cmd)
+
+            if not commands:
+                print("No commands specified")
+                print("Usage: loop <iterations> (<command1> <command2> ... 'wait <seconds>')")
+                return
+
+            # Validate all commands before starting the loop
+            for cmd in commands:
+                if not hasattr(self, f'do_{cmd}'):
+                    print(f"Unknown command: {cmd}")
+                    return
+
+            try:
+                for i in range(iterations):
+                    print("="*50)
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iteration {i+1}/{iterations}")
+                    print("="*50)
+                    print()
+
+                    # Execute each command
+                    for cmd in commands:
+                        getattr(self, f'do_{cmd}')('')
+                        print()
+
+                    # Wait if not the last iteration
+                    if i < iterations - 1 and wait_time:
+                        time.sleep(wait_time)
+
+            except KeyboardInterrupt:
+                print("\nLoop interrupted by user")
+
+        except Exception as e:
+            print(f"Error in loop command: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description='Interactive Cassandra nodetool')
