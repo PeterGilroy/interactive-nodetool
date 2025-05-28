@@ -46,7 +46,18 @@ python interactive_nodetool.py --interactivecommand "info"
 
 # Commands with arguments are also supported
 python interactive_nodetool.py -c "loop 3 (info 'wait 2')"
+
+# Save command output to a file (requires -c/--command)
+python interactive_nodetool.py -c "status" -o output_dir
+python interactive_nodetool.py -c "loop 3 (info status 'wait 2')" -o logs
 ```
+
+The `-o/--output` option:
+- Must be used with `-c/--command`
+- Creates a directory if it doesn't exist
+- Saves command output to files named `nodetool-<command>-<datetime>.out`
+- For loop commands, creates separate files for each command in the loop
+- Writes output both to the file and to the terminal
 
 Once in the shell, you can run nodetool commands directly without the "nodetool" prefix:
 

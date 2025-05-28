@@ -5,6 +5,7 @@ import argparse
 import sys
 import os
 import glob
+import re
 import readline
 from typing import Any, Dict, List, Optional
 from tabulate import tabulate
@@ -56,10 +57,11 @@ def find_cassandra_jars(cassandra_home: str, debug: bool = False) -> List[str]:
 class InteractiveNodetool(cmd2.Cmd):
     """Interactive Cassandra nodetool command prompt."""
     
-    def __init__(self, host: str = 'localhost', port: int = 7199, cassandra_home: str = None, debug: bool = False):
+    def __init__(self, host: str = 'localhost', port: int = 7199, cassandra_home: str = None, debug: bool = False, output_dir: str = None):
         # Initialize readline history
         self.history_file = os.path.expanduser('~/.interactive_nodetool_history')
         self.debug = debug
+        self.output_dir = output_dir
         
         # Load history if it exists
         if os.path.exists(self.history_file):
@@ -1459,6 +1461,98 @@ class InteractiveNodetool(cmd2.Cmd):
                 import traceback
                 traceback.print_exc()
 
+    def default(self, line: str) -> bool:
+        """Handle unknown commands."""
+        print(f"Unknown command: {line.split()[0]}")
+        return False
+
+    def _redirect_output(self, cmd: str, func, args):
+        """Helper method to handle output redirection for commands."""
+        if self.output_dir:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            output_filename = os.path.join(self.output_dir, f"nodetool-{cmd}-{timestamp}.out")
+            with open(output_filename, 'w') as output_file:
+                saved_stdout = sys.stdout
+                try:
+                    sys.stdout = output_file
+                    func(args)
+                    sys.stdout.flush()
+                finally:
+                    sys.stdout = saved_stdout
+                
+                # Also write to terminal
+                with open(output_filename, 'r') as f:
+                    print(f.read(), end='')
+        else:
+            func(args)
+        return False
+
+    def onecmd(self, line: str) -> bool:
+        """Override onecmd to handle output redirection."""
+        if not line:
+            return False
+        
+        cmd, arg, line = self.parseline(line)
+        if not cmd:
+            return False
+        
+        if cmd == 'help':
+            return super().onecmd(line)
+        
+        try:
+            func = getattr(self, 'do_' + cmd)
+        except AttributeError:
+            return self.default(line)
+        
+        if cmd == 'loop':
+            # Special handling for loop command
+            match = re.match(r'(\d+)\s*\((.*)\)', arg)
+            if match:
+                commands_str = match.group(2).strip()
+                commands = [cmd.strip("'") for cmd in re.findall(r'\'[^\']*\'|\S+', commands_str)
+                          if not cmd.strip("'").startswith('wait')]
+                
+                # Create a StringIO to capture loop output
+                from io import StringIO
+                loop_output = StringIO()
+                saved_stdout = sys.stdout
+                
+                try:
+                    # First run loop with output to StringIO
+                    sys.stdout = loop_output
+                    func(arg)
+                    loop_content = loop_output.getvalue()
+                    
+                    # Print loop output to terminal
+                    sys.stdout = saved_stdout
+                    print(loop_content, end='')
+                    
+                    # If output directory specified, save each command's output
+                    if self.output_dir:
+                        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                        for subcmd in commands:
+                            # Execute each command individually to capture its output
+                            cmd_output = StringIO()
+                            sys.stdout = cmd_output
+                            subcmd_func = getattr(self, 'do_' + subcmd)
+                            subcmd_func('')
+                            cmd_content = cmd_output.getvalue()
+                            
+                            # Save command output to file
+                            output_filename = os.path.join(self.output_dir, f"nodetool-{subcmd}-{timestamp}.out")
+                            with open(output_filename, 'w') as f:
+                                f.write(cmd_content)
+                finally:
+                    sys.stdout = saved_stdout
+                    loop_output.close()
+            else:
+                return self.default(line)
+        else:
+            # Handle regular commands
+            self._redirect_output(cmd=cmd, func=func, args=arg or '')
+        
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description='Interactive Cassandra nodetool')
     parser.add_argument('--host', default='localhost',
@@ -1473,15 +1567,33 @@ def main():
                       help='Execute a single command and exit')
     parser.add_argument('-C', '--interactivecommand',
                       help='Execute a command and stay at the prompt')
+    parser.add_argument('-o', '--output',
+                      help='Directory to store command output files (format: nodetool-<command>-<datetime>.out). Can only be used with -c/--command')
     
     args = parser.parse_args()
+
+    # Validate that -o is not used without -c
+    if args.output and not args.command:
+        parser.error("The -o/--output option requires -c/--command")
+    
+    # Set up output redirection if specified
+    original_stdout = sys.stdout
     
     try:
+        # Force line buffering for stdout when using -c flag
+        if args.command:
+            sys.stdout.reconfigure(line_buffering=True)
+        
+        # Create output directory if it doesn't exist
+        if args.output:
+            os.makedirs(args.output, exist_ok=True)
+        
         app = InteractiveNodetool(host=args.host, port=args.port, 
                                 cassandra_home=args.cassandra_home, 
-                                debug=args.debug)
+                                debug=args.debug,
+                                output_dir=args.output)
         
-        def execute_command(cmd_string):
+        def execute_command(cmd_string, is_loop_subcommand=False):
             # Split only on the first space to separate command from arguments
             parts = cmd_string.strip().split(None, 1)
             cmd = parts[0]
@@ -1489,7 +1601,73 @@ def main():
             
             cmd_method = f'do_{cmd}'
             if hasattr(app, cmd_method):
-                getattr(app, cmd_method)(cmd_args)
+                # Special handling for loop command
+                if cmd == 'loop' and not is_loop_subcommand:
+                    # Extract commands from loop
+                    match = re.match(r'(\d+)\s*\((.*)\)', cmd_args)
+                    if match:
+                        iterations = int(match.group(1))
+                        commands_str = match.group(2).strip()
+                        commands = [cmd.strip("'") for cmd in re.findall(r'\'[^\']*\'|\S+', commands_str)
+                                  if not cmd.strip("'").startswith('wait')]
+                        
+                        # Create a StringIO to capture loop output
+                        from io import StringIO
+                        loop_output = StringIO()
+                        saved_stdout = sys.stdout
+                        
+                        try:
+                            # First run loop with output to StringIO
+                            sys.stdout = loop_output
+                            getattr(app, cmd_method)(cmd_args)
+                            loop_content = loop_output.getvalue()
+                            
+                            # Print loop output to terminal
+                            sys.stdout = saved_stdout
+                            print(loop_content, end='')
+                            
+                            # If output directory specified, save loop output
+                            if args.output:
+                                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                                # Save each command's output separately
+                                for subcmd in commands:
+                                    # Execute each command individually to capture its output
+                                    cmd_output = StringIO()
+                                    sys.stdout = cmd_output
+                                    execute_command(subcmd, True)
+                                    cmd_content = cmd_output.getvalue()
+                                    
+                                    # Save command output to file
+                                    output_filename = os.path.join(args.output, f"nodetool-{subcmd}-{timestamp}.out")
+                                    with open(output_filename, 'w') as f:
+                                        f.write(cmd_content)
+                                    
+                                    sys.stdout = saved_stdout
+                        finally:
+                            sys.stdout = saved_stdout
+                            loop_output.close()
+                else:
+                    # Handle non-loop commands or loop subcommands
+                    if args.output and not is_loop_subcommand:
+                        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                        output_filename = os.path.join(args.output, f"nodetool-{cmd}-{timestamp}.out")
+                        with open(output_filename, 'w') as output_file:
+                            saved_stdout = sys.stdout
+                            try:
+                                sys.stdout = output_file
+                                getattr(app, cmd_method)(cmd_args)
+                                sys.stdout.flush()
+                            finally:
+                                sys.stdout = saved_stdout
+                            
+                            # Also write output to terminal for non-loop commands
+                            if not is_loop_subcommand:
+                                with open(output_filename, 'r') as f:
+                                    print(f.read(), end='')
+                    else:
+                        # Execute command normally
+                        func = getattr(app, cmd_method)
+                        app._redirect_output(cmd=cmd, func=func, args=cmd_args)
                 return True
             return False
         
@@ -1497,13 +1675,14 @@ def main():
         if args.command:
             # Execute the command and exit
             if not execute_command(args.command):
-                print(f"Unknown command: {args.command.split()[0]}")
+                print(f"Unknown command: {args.command.split()[0]}", file=original_stdout)
                 sys.exit(1)
+            sys.stdout.flush()  # Ensure all output is flushed
             app.do_exit('')  # Clean exit after command execution
         elif args.interactivecommand:
             # Execute the command and stay at prompt
             if not execute_command(args.interactivecommand):
-                print(f"Unknown command: {args.interactivecommand.split()[0]}")
+                print(f"Unknown command: {args.interactivecommand.split()[0]}", file=original_stdout)
                 sys.exit(1)
             app.cmdloop()  # Continue to interactive mode
         else:
@@ -1511,10 +1690,10 @@ def main():
             app.cmdloop()
             
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=original_stdout)
         if args.debug:
             import traceback
-            traceback.print_exc()
+            traceback.print_exc(file=original_stdout)
         sys.exit(1)
 
 if __name__ == '__main__':
