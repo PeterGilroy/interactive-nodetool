@@ -1513,6 +1513,146 @@ class InteractiveNodetool(cmd2.Cmd):
         """Override onecmd to handle command execution."""
         return cmd2.Cmd.onecmd(self, line)
 
+    def do_netstats(self, args):
+        """Print network information.
+        Usage: netstats [-H]
+        Options:
+          -H, --human-readable  Display bytes in human readable form, i.e. KiB, MiB, GiB, TiB"""
+        try:
+            # Parse arguments
+            human_readable = False
+            if args:
+                args = args.split()
+                if '-H' in args or '--human-readable' in args:
+                    human_readable = True
+
+            # Get operation mode
+            mode = self.storage_proxy.getOperationMode()
+            print(f"Mode: {mode}")
+
+            # Get stream coordinator MBean
+            from javax.management import ObjectName
+            stream_coordinator = ObjectName("org.apache.cassandra.streaming:type=StreamCoordinator")
+            
+            # Check if the MBean exists
+            if self.mbean_connection.isRegistered(stream_coordinator):
+                # Get current streams
+                stream_info = self.mbean_connection.getAttribute(stream_coordinator, "ActiveStreams")
+                
+                if not stream_info or len(stream_info) == 0:
+                    print("Not sending any streams.")
+                else:
+                    for stream in stream_info:
+                        print(f"{stream.description} {stream.planId}")
+                        for session in stream.sessions:
+                            peer = str(session.peer)
+                            connecting = str(session.connecting) if hasattr(session, 'connecting') else peer
+                            print(f"    {peer}")
+                            if peer != connecting:
+                                print(f" (using {connecting})")
+                            print()
+
+                            # Print receiving summaries
+                            if hasattr(session, 'receivingSummaries') and session.receivingSummaries:
+                                total_files = session.getTotalFilesToReceive()
+                                total_size = session.getTotalSizeToReceive()
+                                received_files = session.getTotalFilesReceived()
+                                received_size = session.getTotalSizeReceived()
+                                
+                                percentage_files = (received_files / total_files * 100) if total_files > 0 else 0
+                                percentage_size = (received_size / total_size * 100) if total_size > 0 else 0
+
+                                size_total = self._bytes_to_human_readable(total_size) if human_readable else f"{total_size} bytes"
+                                size_received = self._bytes_to_human_readable(received_size) if human_readable else f"{received_size} bytes"
+
+                                print(f"        Receiving {total_files} files, {size_total} total. "
+                                      f"Already received {received_files} files ({percentage_files:.2f}%), "
+                                      f"{size_received} total ({percentage_size:.2f}%)")
+
+                                for file in session.receivingFiles:
+                                    print(f"            {file}")
+
+                            # Print sending summaries
+                            if hasattr(session, 'sendingSummaries') and session.sendingSummaries:
+                                total_files = session.getTotalFilesToSend()
+                                total_size = session.getTotalSizeToSend()
+                                sent_files = session.getTotalFilesSent()
+                                sent_size = session.getTotalSizeSent()
+                                
+                                percentage_files = (sent_files / total_files * 100) if total_files > 0 else 0
+                                percentage_size = (sent_size / total_size * 100) if total_size > 0 else 0
+
+                                size_total = self._bytes_to_human_readable(total_size) if human_readable else f"{total_size} bytes"
+                                size_sent = self._bytes_to_human_readable(sent_size) if human_readable else f"{sent_size} bytes"
+
+                                print(f"        Sending {total_files} files, {size_total} total. "
+                                      f"Already sent {sent_files} files ({percentage_files:.2f}%), "
+                                      f"{size_sent} total ({percentage_size:.2f}%)")
+
+                                for file in session.sendingFiles:
+                                    print(f"            {file}")
+            else:
+                print("Not sending any streams.")
+
+            # Print read repair statistics if not starting
+            if not self.storage_proxy.isStarting():
+                # Get read repair stats from StorageProxy MBean
+                storage_proxy_bean = ObjectName("org.apache.cassandra.db:type=StorageProxy")
+                attempted = self.mbean_connection.getAttribute(storage_proxy_bean, "ReadRepairAttempted")
+                repaired_blocking = self.mbean_connection.getAttribute(storage_proxy_bean, "ReadRepairRepairedBlocking")
+                repaired_background = self.mbean_connection.getAttribute(storage_proxy_bean, "ReadRepairRepairedBackground")
+                
+                print(f"\nRead Repair Statistics:")
+                print(f"Attempted: {attempted}")
+                print(f"Mismatch (Blocking): {repaired_blocking}")
+                print(f"Mismatch (Background): {repaired_background}")
+
+                # Get messaging service stats
+                ms_bean = ObjectName("org.apache.cassandra.net:type=MessagingService")
+
+                # Print header
+                print(f"\n{'Pool Name':<25}{'Active':>10}{'Pending':>10}{'Completed':>15}{'Dropped':>10}")
+
+                # Helper function to sum dictionary values from CompositeData
+                def sum_dict_values(attr_name):
+                    try:
+                        data = self.mbean_connection.getAttribute(ms_bean, attr_name)
+                        if isinstance(data, dict):
+                            return sum(int(v) for v in data.values())
+                        return int(data)
+                    except:
+                        return 0
+
+                # Large messages
+                large_pending = sum_dict_values("LargeMessagePendingTasks")
+                large_completed = sum_dict_values("TotalLargeMessageCompletedTasks")
+                large_dropped = sum_dict_values("TotalLargeMessageDroppedTasks")
+                print(f"{'Large messages':<25}{'n/a':>10}{large_pending:>10}{large_completed:>15}{large_dropped:>10}")
+
+                # Small messages
+                small_pending = sum_dict_values("SmallMessagePendingTasks")
+                small_completed = sum_dict_values("TotalSmallMessageCompletedTasks")
+                small_dropped = sum_dict_values("TotalSmallMessageDroppedTasks")
+                print(f"{'Small messages':<25}{'n/a':>10}{small_pending:>10}{small_completed:>15}{small_dropped:>10}")
+
+                # Gossip messages
+                gossip_pending = sum_dict_values("GossipMessagePendingTasks")
+                gossip_completed = sum_dict_values("TotalGossipMessageCompletedTasks")
+                gossip_dropped = sum_dict_values("TotalGossipMessageDroppedTasks")
+                print(f"{'Gossip messages':<25}{'n/a':>10}{gossip_pending:>10}{gossip_completed:>15}{gossip_dropped:>10}")
+
+        except Exception as e:
+            print(f"Error getting network stats: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+        return False
+
+    # Shortcut for netstats
+    def do_n(self, args):
+        """Shortcut for netstats command."""
+        return self.do_netstats(args)
+
 def main():
     parser = argparse.ArgumentParser(description='Interactive Cassandra nodetool')
     parser.add_argument('--host', default='localhost',
@@ -1525,8 +1665,6 @@ def main():
                       help='Enable debug output')
     parser.add_argument('-c', '--command',
                       help='Execute a single command and exit')
-    parser.add_argument('-C', '--interactivecommand',
-                      help='Execute a command and stay at the prompt')
     parser.add_argument('-o', '--output',
                       help='Directory to store command output files (format: nodetool-<command>-<datetime>.out). Can only be used with -c/--command')
     
@@ -1553,97 +1691,17 @@ def main():
                                 debug=args.debug,
                                 output_dir=args.output)
         
-        def execute_command(cmd_string, is_loop_subcommand=False):
-            # Split only on the first space to separate command from arguments
-            parts = cmd_string.strip().split(None, 1)
-            cmd = parts[0]
-            cmd_args = parts[1] if len(parts) > 1 else ''
-            
-            cmd_method = f'do_{cmd}'
-            if hasattr(app, cmd_method):
-                # Special handling for loop command
-                if cmd == 'loop' and not is_loop_subcommand:
-                    # Extract commands from loop
-                    match = re.match(r'(\d+)\s*\((.*)\)', cmd_args)
-                    if match:
-                        iterations = int(match.group(1))
-                        commands_str = match.group(2).strip()
-                        commands = [cmd.strip("'") for cmd in re.findall(r'\'[^\']*\'|\S+', commands_str)
-                                  if not cmd.strip("'").startswith('wait')]
-                        
-                        # Create a StringIO to capture loop output
-                        from io import StringIO
-                        loop_output = StringIO()
-                        saved_stdout = sys.stdout
-                        
-                        try:
-                            # First run loop with output to StringIO
-                            sys.stdout = loop_output
-                            getattr(app, cmd_method)(cmd_args)
-                            loop_content = loop_output.getvalue()
-                            
-                            # Print loop output to terminal
-                            sys.stdout = saved_stdout
-                            print(loop_content, end='')
-                            
-                            # If output directory specified, save loop output
-                            if args.output:
-                                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                                # Save each command's output separately
-                                for subcmd in commands:
-                                    # Execute each command individually to capture its output
-                                    cmd_output = StringIO()
-                                    sys.stdout = cmd_output
-                                    execute_command(subcmd, True)
-                                    cmd_content = cmd_output.getvalue()
-                                    
-                                    # Save command output to file
-                                    output_filename = os.path.join(args.output, f"nodetool-{subcmd}-{timestamp}.out")
-                                    with open(output_filename, 'w') as f:
-                                        f.write(cmd_content)
-                                    
-                                    sys.stdout = saved_stdout
-                        finally:
-                            sys.stdout = saved_stdout
-                            loop_output.close()
-                else:
-                    # Handle non-loop commands or loop subcommands
-                    if args.output and not is_loop_subcommand:
-                        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                        output_filename = os.path.join(args.output, f"nodetool-{cmd}-{timestamp}.out")
-                        with open(output_filename, 'w') as output_file:
-                            saved_stdout = sys.stdout
-                            try:
-                                sys.stdout = output_file
-                                getattr(app, cmd_method)(cmd_args)
-                                sys.stdout.flush()
-                            finally:
-                                sys.stdout = saved_stdout
-                            
-                            # Also write output to terminal for non-loop commands
-                            if not is_loop_subcommand:
-                                with open(output_filename, 'r') as f:
-                                    print(f.read(), end='')
-                    else:
-                        # Execute command normally
-                        getattr(app, cmd_method)(cmd_args)
-                return True
-            return False
-        
         # Handle direct command execution
         if args.command:
             # Execute the command and exit
-            if not execute_command(args.command):
-                print(f"Unknown command: {args.command.split()[0]}", file=original_stdout)
+            cmd = args.command.split()[0]
+            if hasattr(app, f'do_{cmd}'):
+                app.run_command(args.command)
+                sys.stdout.flush()  # Ensure all output is flushed
+            else:
+                print(f"Unknown command: {cmd}", file=original_stdout)
                 sys.exit(1)
-            sys.stdout.flush()  # Ensure all output is flushed
             app.do_exit('')  # Clean exit after command execution
-        elif args.interactivecommand:
-            # Execute the command and stay at prompt
-            if not execute_command(args.interactivecommand):
-                print(f"Unknown command: {args.interactivecommand.split()[0]}", file=original_stdout)
-                sys.exit(1)
-            app.cmdloop()  # Continue to interactive mode
         else:
             # Regular interactive mode
             app.cmdloop()
