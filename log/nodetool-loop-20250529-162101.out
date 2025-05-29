@@ -1,0 +1,16 @@
+==================================================
+[2025-05-29 16:21:01] Iteration 1/1
+==================================================
+
+Running command: version
+--------------------
+Cassandra version: 5.0.4
+
+Running command: status
+--------------------
+Datacenter: datacenter1
+=======================
+Status=Up/Down
+|/ State=Normal/Leaving/Joining/Moving
+--  Address      Load        Tokens  Owns (effective)  Host ID                               Rack
+UN  127.0.0.1   227.75 KiB  16      100.0%           3c44b8a4-cac0-49e7-be72-cf041f1d3a08  rack1
