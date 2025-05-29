@@ -76,7 +76,7 @@ class InteractiveNodetool(cmd2.Cmd):
         # Set history length
         readline.set_history_length(1000)
         
-        # Initialize cmd2 without its history feature
+        # Initialize cmd2 with minimal settings
         super().__init__(
             allow_cli_args=False,
             persistent_history_file=None  # Disable cmd2's history
@@ -277,9 +277,11 @@ class InteractiveNodetool(cmd2.Cmd):
                     
                     # Print the line with proper spacing
                     print(f"{status}{state}  {endpoint:<11} {load:<11} {tokens:<7} {ownership:<16} {host_id:<37} {rack}")
-                    
+            
+            return False
         except Exception as e:
             print(f"Error getting status: {e}")
+            return False
 
     # Shortcut for status
     def do_s(self, args):
@@ -933,6 +935,7 @@ class InteractiveNodetool(cmd2.Cmd):
             print(f"Cassandra version: {version}")
         except Exception as e:
             print(f"Error getting version: {e}")
+        return False
 
     # Shortcut for version
     def do_v(self, args):
@@ -1466,29 +1469,8 @@ class InteractiveNodetool(cmd2.Cmd):
         print(f"Unknown command: {line.split()[0]}")
         return False
 
-    def _redirect_output(self, cmd: str, func, args):
-        """Helper method to handle output redirection for commands."""
-        if self.output_dir:
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            output_filename = os.path.join(self.output_dir, f"nodetool-{cmd}-{timestamp}.out")
-            with open(output_filename, 'w') as output_file:
-                saved_stdout = sys.stdout
-                try:
-                    sys.stdout = output_file
-                    func(args)
-                    sys.stdout.flush()
-                finally:
-                    sys.stdout = saved_stdout
-                
-                # Also write to terminal
-                with open(output_filename, 'r') as f:
-                    print(f.read(), end='')
-        else:
-            func(args)
-        return False
-
-    def onecmd(self, line: str) -> bool:
-        """Override onecmd to handle output redirection."""
+    def run_command(self, line: str) -> bool:
+        """Execute a command in command mode with output redirection."""
         if not line:
             return False
         
@@ -1504,54 +1486,32 @@ class InteractiveNodetool(cmd2.Cmd):
         except AttributeError:
             return self.default(line)
         
-        if cmd == 'loop':
-            # Special handling for loop command
-            match = re.match(r'(\d+)\s*\((.*)\)', arg)
-            if match:
-                commands_str = match.group(2).strip()
-                commands = [cmd.strip("'") for cmd in re.findall(r'\'[^\']*\'|\S+', commands_str)
-                          if not cmd.strip("'").startswith('wait')]
-                
-                # Create a StringIO to capture loop output
-                from io import StringIO
-                loop_output = StringIO()
+        # Only use output redirection if output_dir is set (-o flag)
+        if self.output_dir:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            output_filename = os.path.join(self.output_dir, f"nodetool-{cmd}-{timestamp}.out")
+            with open(output_filename, 'w') as output_file:
                 saved_stdout = sys.stdout
-                
                 try:
-                    # First run loop with output to StringIO
-                    sys.stdout = loop_output
-                    func(arg)
-                    loop_content = loop_output.getvalue()
-                    
-                    # Print loop output to terminal
-                    sys.stdout = saved_stdout
-                    print(loop_content, end='')
-                    
-                    # If output directory specified, save each command's output
-                    if self.output_dir:
-                        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                        for subcmd in commands:
-                            # Execute each command individually to capture its output
-                            cmd_output = StringIO()
-                            sys.stdout = cmd_output
-                            subcmd_func = getattr(self, 'do_' + subcmd)
-                            subcmd_func('')
-                            cmd_content = cmd_output.getvalue()
-                            
-                            # Save command output to file
-                            output_filename = os.path.join(self.output_dir, f"nodetool-{subcmd}-{timestamp}.out")
-                            with open(output_filename, 'w') as f:
-                                f.write(cmd_content)
+                    sys.stdout = output_file
+                    result = func(arg) if arg else func('')
+                    sys.stdout.flush()
                 finally:
                     sys.stdout = saved_stdout
-                    loop_output.close()
-            else:
-                return self.default(line)
+                
+                # Also write to terminal
+                with open(output_filename, 'r') as f:
+                    print(f.read(), end='')
+                return result
         else:
-            # Handle regular commands
-            self._redirect_output(cmd=cmd, func=func, args=arg or '')
+            # Execute command normally without any redirection
+            return func(arg) if arg else func('')
         
         return False
+
+    def onecmd(self, line: str, *, add_to_history: bool = True) -> bool:
+        """Override onecmd to handle command execution."""
+        return cmd2.Cmd.onecmd(self, line)
 
 def main():
     parser = argparse.ArgumentParser(description='Interactive Cassandra nodetool')
@@ -1666,8 +1626,7 @@ def main():
                                     print(f.read(), end='')
                     else:
                         # Execute command normally
-                        func = getattr(app, cmd_method)
-                        app._redirect_output(cmd=cmd, func=func, args=cmd_args)
+                        getattr(app, cmd_method)(cmd_args)
                 return True
             return False
         
