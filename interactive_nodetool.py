@@ -14,6 +14,7 @@ import jpype.imports
 from jpype.types import *
 from datetime import datetime
 import time
+import getpass
 
 def find_cassandra_jars(cassandra_home: str, debug: bool = False) -> List[str]:
     """Find all necessary Cassandra JAR files."""
@@ -57,11 +58,13 @@ def find_cassandra_jars(cassandra_home: str, debug: bool = False) -> List[str]:
 class InteractiveNodetool(cmd2.Cmd):
     """Interactive Cassandra nodetool command prompt."""
     
-    def __init__(self, host: str = 'localhost', port: int = 7199, cassandra_home: str = None, debug: bool = False, output_dir: str = None):
+    def __init__(self, host: str = 'localhost', port: int = 7199, cassandra_home: str = None, debug: bool = False, output_dir: str = None, username: str = None, password: str = None):
         # Initialize readline history
         self.history_file = os.path.expanduser('~/.interactive_nodetool_history')
         self.debug = debug
         self.output_dir = output_dir
+        self.username = username
+        self.password = password
         
         # Load history if it exists
         if os.path.exists(self.history_file):
@@ -130,17 +133,44 @@ class InteractiveNodetool(cmd2.Cmd):
             self.jmx_url = JMXServiceURL(jmx_url)
             
             try:
-                self.jmx_connector = JMXConnectorFactory.connect(self.jmx_url)
+                # First try connecting without authentication
+                try:
+                    self.jmx_connector = JMXConnectorFactory.connect(self.jmx_url)
+                except Exception as e:
+                    error_msg = str(e)
+                    if "Authentication failed" in error_msg or "Access denied" in error_msg:
+                        # If authentication is required, try with credentials
+                        if self.username and self.password:
+                            env = HashMap()
+                            creds = jpype.JArray(jpype.JString)([self.username, self.password])
+                            # Use the proper Java constant for JMX credentials
+                            env.put("jmx.remote.credentials", creds)
+                            self.jmx_connector = JMXConnectorFactory.connect(self.jmx_url, env)
+                        else:
+                            print("\nError: JMX authentication is required but no credentials were provided.")
+                            print("Please provide credentials using -u/--username and -pw/--password options.")
+                            sys.exit(1)
+                    elif "Connection refused" in error_msg:
+                        print("\nError: Cannot connect to Cassandra's JMX service.")
+                        print(f"Please check that:")
+                        print(f"1. Cassandra is running on {host}")
+                        print(f"2. JMX is enabled on port {port}")
+                        print(f"3. JMX port is not blocked by firewall")
+                        print("\nTo start Cassandra, run: cassandra -f")
+                        print("To check Cassandra's status: ps aux | grep cassandra")
+                        sys.exit(1)
+                    else:
+                        raise e
+                
             except Exception as e:
                 error_msg = str(e)
-                if "Connection refused" in error_msg:
-                    print("\nError: Cannot connect to Cassandra's JMX service.")
-                    print(f"Please check that:")
-                    print(f"1. Cassandra is running on {host}")
-                    print(f"2. JMX is enabled on port {port}")
-                    print(f"3. JMX port is not blocked by firewall")
-                    print("\nTo start Cassandra, run: cassandra -f")
-                    print("To check Cassandra's status: ps aux | grep cassandra")
+                if "Authentication failed" in error_msg or "Access denied" in error_msg:
+                    print("\nError: JMX authentication failed.")
+                    print("Please check your username and password.")
+                else:
+                    print(f"\nError connecting to JMX: {e}")
+                if hasattr(self, 'jmx_connector'):
+                    self.jmx_connector.close()
                 sys.exit(1)
                 
             self.mbean_connection = self.jmx_connector.getMBeanServerConnection()
@@ -1653,6 +1683,31 @@ class InteractiveNodetool(cmd2.Cmd):
         """Shortcut for netstats command."""
         return self.do_netstats(args)
 
+def read_config_file(config_file: str) -> Dict[str, str]:
+    """Read configuration from file and return as a dictionary.
+    Each line should be in the format: option = value
+    Lines starting with # are treated as comments."""
+    config = {}
+    try:
+        with open(config_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                try:
+                    key, value = [part.strip() for part in line.split('=', 1)]
+                    # Convert option names to argument format
+                    if not key.startswith('-'):
+                        key = '--' + key
+                    config[key] = value
+                except ValueError:
+                    print(f"Warning: Ignoring invalid config line: {line}")
+    except Exception as e:
+        print(f"Error reading config file {config_file}: {e}")
+        sys.exit(1)
+    return config
+
 def main():
     parser = argparse.ArgumentParser(description='Interactive Cassandra nodetool')
     parser.add_argument('--host', default='localhost',
@@ -1667,9 +1722,38 @@ def main():
                       help='Execute a single command and exit')
     parser.add_argument('-o', '--output',
                       help='Directory to store command output files (format: nodetool-<command>-<datetime>.out). Can only be used with -c/--command')
+    parser.add_argument('-u', '--username',
+                      help='Username for JMX authentication')
+    parser.add_argument('-pw', '--password',
+                      help='Password for JMX authentication')
+    parser.add_argument('-f', '--config-file',
+                      help='Read options from config file')
     
-    args = parser.parse_args()
-
+    # First parse just the config file argument
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument('-f', '--config-file')
+    config_args, remaining_argv = config_parser.parse_known_args()
+    
+    # If config file is specified, read it and update arguments
+    if config_args.config_file:
+        config = read_config_file(config_args.config_file)
+        # Convert config items to command line arguments
+        config_argv = []
+        for key, value in config.items():
+            if value.lower() == 'true':
+                config_argv.append(key)
+            elif value.lower() != 'false':
+                config_argv.append(key)
+                config_argv.append(value)
+        # Prepend config arguments so command line arguments take precedence
+        remaining_argv = config_argv + remaining_argv
+    
+    args = parser.parse_args(remaining_argv)
+    
+    # If username is provided but password isn't, prompt for password
+    if args.username and not args.password:
+        args.password = getpass.getpass('Password: ')
+    
     # Validate that -o is not used without -c
     if args.output and not args.command:
         parser.error("The -o/--output option requires -c/--command")
@@ -1689,7 +1773,9 @@ def main():
         app = InteractiveNodetool(host=args.host, port=args.port, 
                                 cassandra_home=args.cassandra_home, 
                                 debug=args.debug,
-                                output_dir=args.output)
+                                output_dir=args.output,
+                                username=args.username,
+                                password=args.password)
         
         # Handle direct command execution
         if args.command:
