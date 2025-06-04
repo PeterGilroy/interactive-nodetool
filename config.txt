@@ -1,0 +1,11 @@
+# Connection settings
+host = localhost
+port = 7199
+
+# Authentication
+#username = cassandra
+#password = cassandra
+
+# Other options
+debug = false
+#cassandra-home = /path/to/cassandra

@@ -40,10 +40,6 @@ Execute commands directly:
 python interactive_nodetool.py -c "status"
 python interactive_nodetool.py --command "info"
 
-# Execute a command and enter interactive mode
-python interactive_nodetool.py -C "status"
-python interactive_nodetool.py --interactivecommand "info"
-
 # Commands with arguments are also supported
 python interactive_nodetool.py -c "loop 3 (info 'wait 2')"
 
@@ -95,6 +91,80 @@ By default, the tool connects to localhost:7199. You can specify different conne
 
 ```bash
 python interactive_nodetool.py --host <host> --port <port> --cassandra-home <cassandra_home>
+```
+
+### Configuration File
+
+You can also specify options in a configuration file and use the `-f/--config-file` option:
+
+```bash
+python interactive_nodetool.py -f config.txt
+```
+
+The configuration file should contain one option per line in the format:
+```
+# Comments start with #
+host = cassandra1.example.com
+port = 7199
+username = admin
+password = mypassword
+debug = true
+cassandra-home = /path/to/cassandra
+```
+
+Options specified on the command line take precedence over those in the config file.
+
+Example config files:
+
+1. Basic connection settings:
+```
+host = localhost
+port = 7199
+```
+
+2. Connection with authentication:
+```
+host = cassandra1.example.com
+username = cassandra
+password = cassandra
+```
+
+3. Full configuration:
+```
+host = cassandra1.example.com
+port = 7199
+username = admin
+password = mypassword
+debug = true
+cassandra-home = /opt/cassandra
+```
+
+### JMX Authentication
+
+If your Cassandra cluster has JMX authentication enabled, you can provide credentials using the following options:
+
+```bash
+# Provide both username and password on command line
+python interactive_nodetool.py -u <username> -pw <password>
+
+# Provide username only - will prompt for password
+python interactive_nodetool.py -u <username>
+```
+
+Or with the long form:
+
+```bash
+python interactive_nodetool.py --username <username> --password <password>
+```
+
+You can combine these with other options:
+
+```bash
+# Provide both username and password
+python interactive_nodetool.py --host cassandra1.example.com --port 7199 -u admin -pw mypassword
+
+# Provide username only - will prompt for password
+python interactive_nodetool.py --host cassandra1.example.com --port 7199 -u admin
 ```
 
 ## Requirements
