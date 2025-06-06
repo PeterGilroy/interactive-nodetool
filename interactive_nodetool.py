@@ -15,6 +15,7 @@ from jpype.types import *
 from datetime import datetime
 import time
 import getpass
+import ssl
 
 def find_cassandra_jars(cassandra_home: str, debug: bool = False) -> List[str]:
     """Find all necessary Cassandra JAR files."""
@@ -58,13 +59,23 @@ def find_cassandra_jars(cassandra_home: str, debug: bool = False) -> List[str]:
 class InteractiveNodetool(cmd2.Cmd):
     """Interactive Cassandra nodetool command prompt."""
     
-    def __init__(self, host: str = 'localhost', port: int = 7199, cassandra_home: str = None, debug: bool = False, output_dir: str = None, username: str = None, password: str = None):
+    def __init__(self, host: str = 'localhost', port: int = 7199, cassandra_home: str = None, 
+                 debug: bool = False, output_dir: str = None, username: str = None, 
+                 password: str = None, ssl: bool = False, truststore: str = None, 
+                 truststore_password: str = None, keystore: str = None, 
+                 keystore_password: str = None, ssl_debug: bool = False):
         # Initialize readline history
         self.history_file = os.path.expanduser('~/.interactive_nodetool_history')
         self.debug = debug
         self.output_dir = output_dir
         self.username = username
         self.password = password
+        self.ssl = ssl
+        self.truststore = truststore
+        self.truststore_password = truststore_password
+        self.keystore = keystore
+        self.keystore_password = keystore_password
+        self.ssl_debug = ssl_debug
         
         # Load history if it exists
         if os.path.exists(self.history_file):
@@ -127,29 +138,119 @@ class InteractiveNodetool(cmd2.Cmd):
             from java.util import HashMap
             from java.net import ConnectException
             from javax.naming import ServiceUnavailableException
+            from javax.net.ssl import SSLContext, TrustManagerFactory, KeyManagerFactory
+            from java.security import KeyStore
+            from java.io import FileInputStream
             
             # Setup JMX connection
             jmx_url = f"service:jmx:rmi:///jndi/rmi://{host}:{port}/jmxrmi"
             self.jmx_url = JMXServiceURL(jmx_url)
             
             try:
-                # First try connecting without authentication
+                # Initialize environment map for JMX connection
+                env = HashMap()
+                
+                # Setup SSL/TLS if enabled
+                if self.ssl:
+                    ssl_env = HashMap()
+                    
+                    # Enable SSL debugging if requested
+                    if self.ssl_debug:
+                        System = jpype.JClass("java.lang.System")
+                        System.setProperty("javax.net.debug", "ssl,handshake")
+                        System.setProperty("com.sun.jndi.rmi.object.trustURLCodebase", "true")
+                        if self.debug:
+                            print("Enabled SSL debugging")
+                    
+                    # Setup truststore if provided
+                    if self.truststore:
+                        if not os.path.exists(self.truststore):
+                            raise Exception(f"Truststore file not found: {self.truststore}")
+                            
+                        if self.debug:
+                            print(f"Loading truststore from {self.truststore}")
+                            
+                        # Set system properties for SSL
+                        System = jpype.JClass("java.lang.System")
+                        System.setProperty("javax.net.ssl.trustStore", os.path.abspath(self.truststore))
+                        System.setProperty("javax.net.ssl.trustStorePassword", self.truststore_password)
+                        System.setProperty("javax.net.ssl.trustStoreType", "JKS")
+                        
+                        try:
+                            trust_store = KeyStore.getInstance("JKS")
+                            with FileInputStream(self.truststore) as fis:
+                                trust_store.load(fis, self.truststore_password.encode('utf-8'))
+                                
+                            # Print certificate information in debug mode
+                            if self.debug:
+                                aliases = trust_store.aliases()
+                                while aliases.hasMoreElements():
+                                    alias = aliases.nextElement()
+                                    cert = trust_store.getCertificate(alias)
+                                    print(f"\nCertificate details for alias: {alias}")
+                                    print(f"  Subject: {cert.getSubjectX500Principal()}")
+                                    print(f"  Issuer: {cert.getIssuerX500Principal()}")
+                                    print(f"  Valid from: {cert.getNotBefore()}")
+                                    print(f"  Valid until: {cert.getNotAfter()}")
+                        
+                            tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+                            tmf.init(trust_store)
+                            
+                            ssl_env.put("com.sun.jndi.rmi.factory.socket", 
+                                      jpype.JClass("javax.rmi.ssl.SslRMIClientSocketFactory")())
+                            
+                        except Exception as e:
+                            raise Exception(f"Failed to load truststore: {e}")
+                    
+                    # Setup keystore if provided
+                    if self.keystore:
+                        if not os.path.exists(self.keystore):
+                            raise Exception(f"Keystore file not found: {self.keystore}")
+                            
+                        if self.debug:
+                            print(f"Loading keystore from {self.keystore}")
+                            
+                        # Set system properties for SSL
+                        System.setProperty("javax.net.ssl.keyStore", os.path.abspath(self.keystore))
+                        System.setProperty("javax.net.ssl.keyStorePassword", self.keystore_password)
+                        System.setProperty("javax.net.ssl.keyStoreType", "JKS")
+                        
+                        try:
+                            key_store = KeyStore.getInstance("JKS")
+                            with FileInputStream(self.keystore) as fis:
+                                key_store.load(fis, self.keystore_password.encode('utf-8'))
+                            
+                            kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+                            kmf.init(key_store, self.keystore_password.encode('utf-8'))
+                            
+                        except Exception as e:
+                            raise Exception(f"Failed to load keystore: {e}")
+                    
+                    # Add SSL environment to main environment
+                    env.putAll(ssl_env)
+                
+                # Add credentials if provided
+                if self.username and self.password:
+                    creds = jpype.JArray(jpype.JString)([self.username, self.password])
+                    env.put("jmx.remote.credentials", creds)
+                
+                # First try connecting with the configured environment
                 try:
-                    self.jmx_connector = JMXConnectorFactory.connect(self.jmx_url)
+                    if self.debug:
+                        print("\nAttempting JMX connection...")
+                        print(f"URL: {self.jmx_url}")
+                        print(f"SSL enabled: {self.ssl}")
+                        if self.ssl:
+                            print(f"Truststore: {self.truststore}")
+                            print(f"Keystore: {self.keystore}")
+                    
+                    self.jmx_connector = JMXConnectorFactory.connect(self.jmx_url, env)
                 except Exception as e:
                     error_msg = str(e)
                     if "Authentication failed" in error_msg or "Access denied" in error_msg:
-                        # If authentication is required, try with credentials
-                        if self.username and self.password:
-                            env = HashMap()
-                            creds = jpype.JArray(jpype.JString)([self.username, self.password])
-                            # Use the proper Java constant for JMX credentials
-                            env.put("jmx.remote.credentials", creds)
-                            self.jmx_connector = JMXConnectorFactory.connect(self.jmx_url, env)
-                        else:
-                            print("\nError: JMX authentication is required but no credentials were provided.")
-                            print("Please provide credentials using -u/--username and -pw/--password options.")
-                            sys.exit(1)
+                        print("\nError: JMX authentication failed.")
+                        print("Please check your username and password.")
+                        raise e
                     elif "Connection refused" in error_msg:
                         print("\nError: Cannot connect to Cassandra's JMX service.")
                         print(f"Please check that:")
@@ -158,20 +259,46 @@ class InteractiveNodetool(cmd2.Cmd):
                         print(f"3. JMX port is not blocked by firewall")
                         print("\nTo start Cassandra, run: cassandra -f")
                         print("To check Cassandra's status: ps aux | grep cassandra")
-                        sys.exit(1)
+                        raise e
+                    elif "SSLHandshakeException" in error_msg:
+                        print("\nError: SSL/TLS handshake failed.")
+                        print("Please check your SSL configuration:")
+                        print("1. Verify truststore and keystore paths")
+                        print("2. Verify truststore and keystore passwords")
+                        print("3. Ensure the certificates are valid and trusted")
+                        print("\nDetailed error information:")
+                        print(f"  {error_msg}")
+                        print("\nTroubleshooting steps:")
+                        print("1. Run with --debug and --ssl-debug flags for detailed SSL information")
+                        print("2. Verify the certificate in your truststore matches the server's certificate")
+                        print("3. Check if the server's SSL certificate is expired")
+                        print("4. Ensure the server's certificate authority is in your truststore")
+                        print("5. Verify JMX SSL is properly configured on the Cassandra server")
+                        raise e
+                    elif "non-JRMP server at remote endpoint" in error_msg:
+                        print("\nError: Failed to connect to JMX - SSL might be required.")
+                        print("This error typically occurs when trying to connect to an SSL-enabled JMX endpoint without SSL configuration.")
+                        print("\nTo fix this:")
+                        print("1. Enable SSL in your configuration:")
+                        print("   Add to config file:")
+                        print("     ssl = true")
+                        print("     truststore = /path/to/truststore.jks")
+                        print("     truststore-password = your_password")
+                        print("\n   Or use command line arguments:")
+                        print("     --ssl --truststore /path/to/truststore.jks")
+                        print("\n2. Verify JMX SSL settings in cassandra-env.sh:")
+                        print("   - com.sun.management.jmxremote.ssl=true")
+                        print("   - javax.net.ssl.keyStore=/path/to/keystore.jks")
+                        print("\n3. If you're sure SSL is not required, verify JMX SSL is disabled on the server:")
+                        print("   - com.sun.management.jmxremote.ssl=false")
+                        raise e
                     else:
                         raise e
-                
+
             except Exception as e:
-                error_msg = str(e)
-                if "Authentication failed" in error_msg or "Access denied" in error_msg:
-                    print("\nError: JMX authentication failed.")
-                    print("Please check your username and password.")
-                else:
-                    print(f"\nError connecting to JMX: {e}")
                 if hasattr(self, 'jmx_connector'):
                     self.jmx_connector.close()
-                sys.exit(1)
+                raise e
                 
             self.mbean_connection = self.jmx_connector.getMBeanServerConnection()
             
@@ -1729,6 +1856,21 @@ def main():
     parser.add_argument('-f', '--config-file',
                       help='Read options from config file')
     
+    # Add SSL/TLS related arguments
+    ssl_group = parser.add_argument_group('SSL/TLS options')
+    ssl_group.add_argument('--ssl', action='store_true',
+                        help='Enable SSL/TLS for JMX connection')
+    ssl_group.add_argument('--truststore',
+                        help='Path to truststore file')
+    ssl_group.add_argument('--truststore-password',
+                        help='Password for truststore')
+    ssl_group.add_argument('--keystore',
+                        help='Path to keystore file')
+    ssl_group.add_argument('--keystore-password',
+                        help='Password for keystore')
+    ssl_group.add_argument('--ssl-debug', action='store_true',
+                        help='Enable SSL/TLS debugging output')
+    
     # First parse just the config file argument
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument('-f', '--config-file')
@@ -1754,6 +1896,13 @@ def main():
     if args.username and not args.password:
         args.password = getpass.getpass('Password: ')
     
+    # If SSL is enabled, handle SSL-related passwords
+    if args.ssl:
+        if args.truststore and not args.truststore_password:
+            args.truststore_password = getpass.getpass('Truststore password: ')
+        if args.keystore and not args.keystore_password:
+            args.keystore_password = getpass.getpass('Keystore password: ')
+    
     # Validate that -o is not used without -c
     if args.output and not args.command:
         parser.error("The -o/--output option requires -c/--command")
@@ -1770,12 +1919,21 @@ def main():
         if args.output:
             os.makedirs(args.output, exist_ok=True)
         
-        app = InteractiveNodetool(host=args.host, port=args.port, 
-                                cassandra_home=args.cassandra_home, 
-                                debug=args.debug,
-                                output_dir=args.output,
-                                username=args.username,
-                                password=args.password)
+        app = InteractiveNodetool(
+            host=args.host,
+            port=args.port,
+            cassandra_home=args.cassandra_home,
+            debug=args.debug,
+            output_dir=args.output,
+            username=args.username,
+            password=args.password,
+            ssl=args.ssl,
+            truststore=args.truststore,
+            truststore_password=args.truststore_password,
+            keystore=args.keystore,
+            keystore_password=args.keystore_password,
+            ssl_debug=args.ssl_debug
+        )
         
         # Handle direct command execution
         if args.command:
