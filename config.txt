@@ -9,3 +9,10 @@ port = 7199
 # Other options
 debug = false
 #cassandra-home = /path/to/cassandra
+
+# SSL/TLS options
+#ssl = true
+#truststore = /path/to/truststore.jks
+#truststore-password = mypass
+#keystore = /path/to/keystore.jks
+#keystore-password = mypass

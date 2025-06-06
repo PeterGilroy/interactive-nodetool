@@ -13,6 +13,7 @@ An interactive command-line interface for Apache Cassandra's nodetool functional
 - Efficient command execution
 - Command looping with configurable wait times
 - Direct command execution from command line
+- SSL/TLS support for secure JMX connections
 
 ## Installation
 
@@ -22,7 +23,7 @@ An interactive command-line interface for Apache Cassandra's nodetool functional
    pip install -r requirements.txt
    ```
 3. Ensure you have a Java Runtime Environment (JRE) installed
-4. Set the CASSANDRA_HOME environment variable to point to your Cassandra installation:
+4. Set the CASSANDRA_HOME environment variable to point to your Cassandra installation or pass this into the script with the --cassandra-home parameter:
    ```bash
    export CASSANDRA_HOME=/path/to/cassandra
    ```
@@ -90,7 +91,7 @@ Each iteration will be timestamped and separated by clear markers for easy readi
 By default, the tool connects to localhost:7199. You can specify different connection parameters when starting the tool:
 
 ```bash
-python interactive_nodetool.py --host <host> --port <port> --cassandra-home <cassandra_home>
+python interactive_nodetool.py --host <host> --port <port>
 ```
 
 ### Configuration File
@@ -129,7 +130,7 @@ username = cassandra
 password = cassandra
 ```
 
-3. Full configuration:
+3. Full configuration with SSL:
 ```
 host = cassandra1.example.com
 port = 7199
@@ -137,6 +138,11 @@ username = admin
 password = mypassword
 debug = true
 cassandra-home = /opt/cassandra
+ssl = true
+truststore = /path/to/truststore.jks
+truststore-password = mytrustpass
+keystore = /path/to/keystore.jks
+keystore-password = mykeypass
 ```
 
 ### JMX Authentication
@@ -167,6 +173,61 @@ python interactive_nodetool.py --host cassandra1.example.com --port 7199 -u admi
 python interactive_nodetool.py --host cassandra1.example.com --port 7199 -u admin
 ```
 
+### SSL/TLS Support
+
+The tool supports secure JMX connections using SSL/TLS. You can enable SSL/TLS and configure the truststore and keystore using the following options:
+
+```bash
+# Enable SSL with truststore only (one-way SSL)
+python interactive_nodetool.py --ssl \
+  --truststore /path/to/truststore.jks \
+  --truststore-password mytrustpass
+
+# Enable SSL with both truststore and keystore (two-way SSL)
+python interactive_nodetool.py --ssl \
+  --truststore /path/to/truststore.jks \
+  --truststore-password mytrustpass \
+  --keystore /path/to/keystore.jks \
+  --keystore-password mykeypass
+```
+
+You can also combine SSL/TLS with other options:
+
+```bash
+# SSL with authentication and custom host/port
+python interactive_nodetool.py --host cassandra1.example.com \
+  --port 7199 \
+  --username admin \
+  --password mypass \
+  --ssl \
+  --truststore /path/to/truststore.jks \
+  --truststore-password mytrustpass
+```
+
+If you don't provide the truststore or keystore passwords on the command line, you will be prompted for them securely.
+
+You can also specify SSL/TLS configuration in a config file:
+
+```
+# SSL configuration in config.txt
+ssl = true
+truststore = /path/to/truststore.jks
+truststore-password = mytrustpass
+keystore = /path/to/keystore.jks
+keystore-password = mykeypass
+```
+
+For debugging SSL/TLS issues, use the `-d` or `--debug` flag:
+
+```bash
+python interactive_nodetool.py --ssl --truststore /path/to/truststore.jks -d
+```
+
+This will show detailed information about the SSL/TLS connection process, including:
+- Truststore and keystore loading
+- SSL/TLS handshake details
+- Any SSL/TLS related errors
+
 ## Requirements
 
 - Python 3.8+
@@ -174,6 +235,7 @@ python interactive_nodetool.py --host cassandra1.example.com --port 7199 -u admi
 - Running Cassandra instance
 - JMX access to Cassandra node
 - Cassandra installation (for accessing JMX classes)
+- Java keystore files (for SSL/TLS connections)
 
 ## Implementation Details
 
@@ -184,6 +246,7 @@ The implementation:
 2. Establishes a JMX connection to Cassandra
 3. Uses Cassandra's MBeans directly for operations
 4. Maintains the JVM and connection throughout the session
+5. Supports secure connections via SSL/TLS
 
 ## Notes
 
