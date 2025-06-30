@@ -1,254 +1,221 @@
 # Interactive Nodetool
 
-An interactive command-line interface for Apache Cassandra's nodetool functionality. This tool provides a shell-like interface for executing nodetool commands, with features like command history, tab completion, and built-in help. Unlike the standard nodetool command, this implementation uses JMX directly, maintaining a single JVM instance for better performance.
+An interactive command-line tool for managing Apache Cassandra and DataStax Enterprise (DSE) clusters, built with Python and JPype.
 
 ## Features
 
-- Interactive prompt for nodetool commands
-- Command history and recall
-- Tab completion for commands and options
-- Built-in help and documentation
-- Direct JMX connection to Cassandra nodes (no subprocess calls)
-- Single JVM instance for all operations
-- Efficient command execution
-- Command looping with configurable wait times
-- Direct command execution from command line
-- SSL/TLS support for secure JMX connections
+- **Interactive shell** with command history and tab completion
+- **Version compatibility** for Cassandra 4.0+, 4.1+, 5.0+ and DSE 5.1+, 6.8+, 6.9+
+- **Automatic version detection** and feature compatibility
+- **SSL/TLS support** for secure JMX connections
+- **Output redirection** for command results
+- **DSE-specific features** detection and information
+- **Comprehensive compatibility analysis** and warnings
+
+## Supported Versions
+
+### Apache Cassandra
+- **4.0.x** - Full support with modern gossip states and endpoint ports
+- **4.1.x** - Full support with all 4.0 features
+- **5.0.x** - Full support with CIDR filtering and disk usage metrics
+
+### DataStax Enterprise (DSE)
+- **5.1.x** - Full support with DSE-specific features
+- **6.8.x** - Full support with Analytics, Search, and Graph
+- **6.9.x** - Full support with all DSE features
 
 ## Installation
 
-1. Clone this repository
-2. Install dependencies:
+1. **Install Python dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
-3. Ensure you have a Java Runtime Environment (JRE) installed
-4. Set the CASSANDRA_HOME environment variable to point to your Cassandra installation or pass this into the script with the --cassandra-home parameter:
+
+2. **Set CASSANDRA_HOME environment variable:**
    ```bash
    export CASSANDRA_HOME=/path/to/cassandra
    ```
 
+3. **Run the tool:**
+   ```bash
+   python3 interactive_nodetool.py
+   ```
+
 ## Usage
 
-Run the interactive shell:
-```bash
-python interactive_nodetool.py [--host HOST] [--port PORT] [--cassandra-home CASSANDRA_HOME]
-```
-
-Execute commands directly:
-```bash
-# Execute a command and exit
-python interactive_nodetool.py -c "status"
-python interactive_nodetool.py --command "info"
-
-# Commands with arguments are also supported
-python interactive_nodetool.py -c "loop 3 (info 'wait 2')"
-
-# Save command output to a file (requires -c/--command)
-python interactive_nodetool.py -c "status" -o output_dir
-python interactive_nodetool.py -c "loop 3 (info status 'wait 2')" -o logs
-```
-
-The `-o/--output` option:
-- Must be used with `-c/--command`
-- Creates a directory if it doesn't exist
-- Saves command output to files named `nodetool-<command>-<datetime>.out`
-- For loop commands, creates separate files for each command in the loop
-- Writes output both to the file and to the terminal
-
-Once in the shell, you can run nodetool commands directly without the "nodetool" prefix:
-
-```
-interactive-nodetool> status
-interactive-nodetool> info
-interactive-nodetool> help
-```
-
-### Command Looping
-
-You can run commands in a loop with a configurable wait time between iterations using the `loop` command:
-
-```
-loop <iterations> (<command1> <command2> ... 'wait <seconds>')
-```
-
-Examples:
-```
-# Run info and status 3 times with 2 second wait between iterations
-interactive-nodetool> loop 3 (info status 'wait 2')
-
-# Monitor compaction status every 5 seconds, 10 times
-interactive-nodetool> loop 10 (compactionstatus 'wait 5')
-
-# Check node status every second, 60 times (1 minute monitoring)
-interactive-nodetool> loop 60 (status 'wait 1')
-```
-
-Each iteration will be timestamped and separated by clear markers for easy reading. You can interrupt the loop at any time using Ctrl+C.
-
-## Configuration
-
-By default, the tool connects to localhost:7199. You can specify different connection parameters when starting the tool:
+### Basic Usage
 
 ```bash
-python interactive_nodetool.py --host <host> --port <port>
+# Connect to local Cassandra instance
+python3 interactive_nodetool.py
+
+# Connect to remote instance
+python3 interactive_nodetool.py --host 192.168.1.100 --port 7199
+
+# Execute single command and exit
+python3 interactive_nodetool.py -c status
+
+# Save command output to file
+python3 interactive_nodetool.py -c status -o /tmp/output
+```
+
+### SSL/TLS Connection
+
+```bash
+# Connect with SSL
+python3 interactive_nodetool.py --ssl --truststore /path/to/truststore.jks
+
+# Connect with SSL and authentication
+python3 interactive_nodetool.py --ssl --truststore /path/to/truststore.jks \
+    --keystore /path/to/keystore.jks --username admin
 ```
 
 ### Configuration File
 
-You can also specify options in a configuration file and use the `-f/--config-file` option:
-
-```bash
-python interactive_nodetool.py -f config.txt
+Create a `config.txt` file:
 ```
-
-The configuration file should contain one option per line in the format:
-```
-# Comments start with #
-host = cassandra1.example.com
+host = 192.168.1.100
 port = 7199
-username = admin
-password = mypassword
-debug = true
-cassandra-home = /path/to/cassandra
-```
-
-Options specified on the command line take precedence over those in the config file.
-
-Example config files:
-
-1. Basic connection settings:
-```
-host = localhost
-port = 7199
-```
-
-2. Connection with authentication:
-```
-host = cassandra1.example.com
-username = cassandra
-password = cassandra
-```
-
-3. Full configuration with SSL:
-```
-host = cassandra1.example.com
-port = 7199
-username = admin
-password = mypassword
-debug = true
-cassandra-home = /opt/cassandra
 ssl = true
 truststore = /path/to/truststore.jks
-truststore-password = mytrustpass
-keystore = /path/to/keystore.jks
-keystore-password = mykeypass
+truststore-password = mypassword
+username = admin
+password = mypassword
 ```
 
-### JMX Authentication
-
-If your Cassandra cluster has JMX authentication enabled, you can provide credentials using the following options:
-
+Then use:
 ```bash
-# Provide both username and password on command line
-python interactive_nodetool.py -u <username> -pw <password>
-
-# Provide username only - will prompt for password
-python interactive_nodetool.py -u <username>
+python3 interactive_nodetool.py -f config.txt
 ```
 
-Or with the long form:
+## Commands
 
+### Standard Nodetool Commands
+- `status` / `s` - Show cluster status
+- `info` / `i` - Get node information
+- `version` / `v` - Print Cassandra version
+- `gossipinfo` - Show gossip information
+- `describecluster` - Show cluster information
+- `tpstats` / `tps` - Print thread pool statistics
+- `compactionstats` - Print compaction statistics
+- `tablestats` - Show table statistics
+- `netstats` / `n` - Print network information
+
+### Version Compatibility Commands
+- `versioninfo` - Show detailed version and compatibility information
+- `compatibility` - Show compatibility warnings and recommendations
+- `dseinfo` - Show DSE-specific information (DSE only)
+
+### Utility Commands
+- `loop` - Run commands in a loop with wait time
+- `help` - Show available commands
+- `exit` / `quit` - Exit the tool
+
+## Version Compatibility
+
+The tool automatically detects your Cassandra/DSE version and adjusts its behavior accordingly:
+
+### Version Detection
+- Automatically detects Cassandra vs DSE
+- Parses version numbers (major.minor.patch)
+- Identifies available features and deprecated methods
+
+### Feature Compatibility
+- **Cassandra 4.0+**: Modern gossip states, endpoint ports, SSL debugging
+- **Cassandra 5.0+**: CIDR filtering, disk usage metrics, additional application states
+- **DSE**: Analytics, Search, Graph, and Insights detection
+
+### Compatibility Warnings
+The `compatibility` command shows:
+- Deprecated methods in your version
+- Missing features compared to newer versions
+- Version-specific recommendations
+- Potential compatibility issues
+
+## Examples
+
+### Check Version Compatibility
+```
+interactive-nodetool> versioninfo
+Detected Version: 5.0.4
+Is DSE: False
+Major: 5
+Minor: 0
+Patch: 4
+
+Compatibility Features:
+  Supports ports in endpoints: True
+  SSL debugging supported: True
+  Audit logging supported: True
+  Full query logging supported: True
+  CIDR filtering supported: True
+```
+
+### DSE Information
+```
+interactive-nodetool> dseinfo
+DSE Version: DSE 6.8.0
+Based on Cassandra: 6.8.0
+
+DSE Analytics:
+  Status: Available
+
+DSE Search:
+  Status: Available
+
+DSE Graph:
+  Status: Available
+```
+
+### Compatibility Analysis
+```
+interactive-nodetool> compatibility
+Compatibility Analysis for 5.0.4
+==================================================
+
+📋 RECOMMENDATIONS:
+  - This is a recent version with all modern features
+  - CIDR filtering and disk usage metrics are available
+
+✅ COMPATIBILITY STATUS:
+  - Fully compatible with this tool
+```
+
+## Troubleshooting
+
+### Connection Issues
+- Ensure Cassandra is running and JMX is enabled
+- Check firewall settings for JMX port (default: 7199)
+- Verify SSL configuration if using SSL
+
+### Version Detection Issues
+- Run `versioninfo` to see detected version
+- Use `compatibility` to check for issues
+- Enable debug mode with `--debug` for detailed information
+
+### DSE-Specific Issues
+- Use `dseinfo` to check DSE component availability
+- Ensure DSE-specific JARs are in the classpath
+- Check DSE documentation for version-specific features
+
+## Development
+
+### Running Tests
 ```bash
-python interactive_nodetool.py --username <username> --password <password>
+# Test version detection logic
+python3 test_version_detection.py
 ```
 
-You can combine these with other options:
+### Adding New Commands
+1. Add a `do_commandname` method to the `InteractiveNodetool` class
+2. Use `self.version_compat` for version-specific behavior
+3. Add appropriate error handling and debug output
 
-```bash
-# Provide both username and password
-python interactive_nodetool.py --host cassandra1.example.com --port 7199 -u admin -pw mypassword
+### Version Compatibility
+- Use `self.cassandra_version` to check version
+- Use `self.version_compat` for version-specific methods
+- Test with multiple Cassandra/DSE versions
 
-# Provide username only - will prompt for password
-python interactive_nodetool.py --host cassandra1.example.com --port 7199 -u admin
-```
+## License
 
-### SSL/TLS Support
-
-The tool supports secure JMX connections using SSL/TLS. You can enable SSL/TLS and configure the truststore and keystore using the following options:
-
-```bash
-# Enable SSL with truststore only (one-way SSL)
-python interactive_nodetool.py --ssl \
-  --truststore /path/to/truststore.jks \
-  --truststore-password mytrustpass
-
-# Enable SSL with both truststore and keystore (two-way SSL)
-python interactive_nodetool.py --ssl \
-  --truststore /path/to/truststore.jks \
-  --truststore-password mytrustpass \
-  --keystore /path/to/keystore.jks \
-  --keystore-password mykeypass
-```
-
-You can also combine SSL/TLS with other options:
-
-```bash
-# SSL with authentication and custom host/port
-python interactive_nodetool.py --host cassandra1.example.com \
-  --port 7199 \
-  --username admin \
-  --password mypass \
-  --ssl \
-  --truststore /path/to/truststore.jks \
-  --truststore-password mytrustpass
-```
-
-If you don't provide the truststore or keystore passwords on the command line, you will be prompted for them securely.
-
-You can also specify SSL/TLS configuration in a config file:
-
-```
-# SSL configuration in config.txt
-ssl = true
-truststore = /path/to/truststore.jks
-truststore-password = mytrustpass
-keystore = /path/to/keystore.jks
-keystore-password = mykeypass
-```
-
-For debugging SSL/TLS issues, use the `-d` or `--debug` flag:
-
-```bash
-python interactive_nodetool.py --ssl --truststore /path/to/truststore.jks -d
-```
-
-This will show detailed information about the SSL/TLS connection process, including:
-- Truststore and keystore loading
-- SSL/TLS handshake details
-- Any SSL/TLS related errors
-
-## Requirements
-
-- Python 3.8+
-- Java Runtime Environment (JRE)
-- Running Cassandra instance
-- JMX access to Cassandra node
-- Cassandra installation (for accessing JMX classes)
-- Java keystore files (for SSL/TLS connections)
-
-## Implementation Details
-
-This tool uses JMX (Java Management Extensions) to communicate directly with Cassandra, maintaining a single JVM instance throughout the session. This approach is more efficient than the traditional nodetool command, which starts a new JVM for each command execution.
-
-The implementation:
-1. Starts a JVM using JPype
-2. Establishes a JMX connection to Cassandra
-3. Uses Cassandra's MBeans directly for operations
-4. Maintains the JVM and connection throughout the session
-5. Supports secure connections via SSL/TLS
-
-## Notes
-
-This has currently only been tested against a local install of Cassanra 5.0.4.
-This is not a wrapper for the native nodetool commands and is performing the underlying JMX calls and formatting the output in a similar way to nodetool. Therefore need to add each nodetool command over time.
+This project is licensed under the Apache License 2.0.

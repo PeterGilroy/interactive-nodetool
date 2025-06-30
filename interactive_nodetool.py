@@ -17,6 +17,273 @@ import time
 import getpass
 import ssl
 
+class CassandraVersion:
+    """Represents a Cassandra or DSE version."""
+    
+    def __init__(self, version_string: str):
+        # Convert Java String to Python string if needed
+        if hasattr(version_string, 'toString'):
+            version_string = str(version_string)
+        
+        self.version_string = version_string
+        self.is_dse = version_string.startswith('DSE')
+        
+        # Parse version components
+        if self.is_dse:
+            # DSE format: "DSE 6.8.0" or "DSE 5.1.0"
+            parts = version_string.split()
+            if len(parts) >= 2:
+                version_parts = parts[1].split('.')
+                self.major = int(version_parts[0]) if len(version_parts) > 0 else 0
+                self.minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+                self.patch = int(version_parts[2]) if len(version_parts) > 2 else 0
+            else:
+                self.major = self.minor = self.patch = 0
+        else:
+            # Cassandra format: "5.0.4" or "4.1.0"
+            version_parts = version_string.split('.')
+            self.major = int(version_parts[0]) if len(version_parts) > 0 else 0
+            self.minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+            self.patch = int(version_parts[2]) if len(version_parts) > 2 else 0
+    
+    def __str__(self):
+        return self.version_string
+    
+    def __repr__(self):
+        return f"CassandraVersion('{self.version_string}')"
+    
+    def is_at_least(self, major: int, minor: int = 0, patch: int = 0) -> bool:
+        """Check if this version is at least the specified version."""
+        if self.major > major:
+            return True
+        elif self.major == major:
+            if self.minor > minor:
+                return True
+            elif self.minor == minor:
+                return self.patch >= patch
+        return False
+    
+    def is_between(self, min_major: int, min_minor: int, max_major: int, max_minor: int) -> bool:
+        """Check if this version is between the specified versions (inclusive)."""
+        return (self.is_at_least(min_major, min_minor) and 
+                not self.is_at_least(max_major, max_minor + 1))
+
+class VersionCompatibility:
+    """Handles version-specific compatibility for different Cassandra/DSE versions."""
+    
+    def __init__(self, version: CassandraVersion):
+        self.version = version
+        self.debug = False
+    
+    def get_failure_detector_mbean_name(self) -> str:
+        """Get the correct MBean name for FailureDetector."""
+        # This has been consistent across versions
+        return "org.apache.cassandra.net:type=FailureDetector"
+    
+    def get_storage_service_mbean_name(self) -> str:
+        """Get the correct MBean name for StorageService."""
+        # This has been consistent across versions
+        return "org.apache.cassandra.db:type=StorageService"
+    
+    def get_gossip_info_method(self) -> str:
+        """Get the correct method name for getting gossip info."""
+        if self.version.is_at_least(5, 0):
+            # Cassandra 5.0+ and DSE 6.8+ use getAllEndpointStatesWithPort
+            return "getAllEndpointStatesWithPort"
+        elif self.version.is_at_least(4, 0):
+            # Cassandra 4.0+ uses getAllEndpointStatesWithPort
+            return "getAllEndpointStatesWithPort"
+        else:
+            # Older versions use getAllEndpointStates
+            return "getAllEndpointStates"
+    
+    def get_application_states(self) -> List[str]:
+        """Get the list of application states available in this version."""
+        base_states = [
+            "LOAD", "SCHEMA", "DC", "RACK", "RELEASE_VERSION", 
+            "REMOVAL_COORDINATOR", "SEVERITY", "NET_VERSION", 
+            "HOST_ID", "TOKENS", "RPC_READY"
+        ]
+        
+        if self.version.is_at_least(4, 0):
+            # Cassandra 4.0+ adds these states
+            base_states.extend([
+                "INTERNAL_ADDRESS_AND_PORT", "NATIVE_ADDRESS_AND_PORT", 
+                "STATUS_WITH_PORT", "SSTABLE_VERSIONS"
+            ])
+        
+        if self.version.is_at_least(5, 0):
+            # Cassandra 5.0+ adds these states
+            base_states.extend([
+                "DISK_USAGE", "INDEX_STATUS"
+            ])
+        
+        return base_states
+    
+    def get_metrics_patterns(self) -> Dict[str, str]:
+        """Get version-specific metrics patterns."""
+        patterns = {
+            "thread_pools": "org.apache.cassandra.metrics:type=ThreadPools,path=*,scope=*,name=*",
+            "table_metrics": "org.apache.cassandra.metrics:type=Table,*",
+            "cache_metrics": "org.apache.cassandra.metrics:type=Cache,scope=*,name=*",
+            "compaction_metrics": "org.apache.cassandra.metrics:type=Compaction,name=*",
+            "client_request_metrics": "org.apache.cassandra.metrics:type=ClientRequest,scope=*,name=*"
+        }
+        
+        # DSE might have additional metrics
+        if self.version.is_dse:
+            patterns.update({
+                "dse_metrics": "com.datastax.bdp:type=*,*",
+                "search_metrics": "com.datastax.bdp.search:type=*,*"
+            })
+        
+        return patterns
+    
+    def get_deprecated_methods(self) -> List[str]:
+        """Get list of deprecated methods in this version."""
+        deprecated = []
+        
+        if self.version.is_at_least(4, 0):
+            deprecated.extend([
+                "getAllEndpointStates",  # Deprecated in 4.0
+                "getSimpleStates",       # Deprecated in 4.0
+                "getPhiValues"           # Deprecated in 4.0
+            ])
+        
+        if self.version.is_at_least(5, 0):
+            deprecated.extend([
+                "getAllEndpointStatesWithResolveIp"  # Deprecated in 5.0
+            ])
+        
+        return deprecated
+    
+    def should_use_port_in_endpoints(self) -> bool:
+        """Determine if endpoints should include ports."""
+        return self.version.is_at_least(4, 0)
+    
+    def supports_boolean_parameter_methods(self) -> bool:
+        """Check if the newer methods with boolean parameters are available."""
+        # These methods were added in Cassandra 4.0
+        return self.version.is_at_least(4, 0)
+    
+    def get_default_jmx_port(self) -> int:
+        """Get the default JMX port for this version."""
+        return 7199  # Consistent across versions
+    
+    def get_default_native_port(self) -> int:
+        """Get the default native transport port for this version."""
+        return 9042  # Consistent across versions
+    
+    def get_default_storage_port(self) -> int:
+        """Get the default storage port for this version."""
+        return 7000  # Consistent across versions
+    
+    def supports_ssl_debug(self) -> bool:
+        """Check if SSL debugging is supported."""
+        return self.version.is_at_least(4, 0)
+    
+    def supports_audit_logging(self) -> bool:
+        """Check if audit logging is supported."""
+        return self.version.is_at_least(4, 0)
+    
+    def supports_full_query_logging(self) -> bool:
+        """Check if full query logging is supported."""
+        return self.version.is_at_least(4, 0)
+    
+    def supports_cidr_filtering(self) -> bool:
+        """Check if CIDR filtering is supported."""
+        return self.version.is_at_least(5, 0)
+    
+    def get_version_info(self) -> Dict[str, Any]:
+        """Get comprehensive version information."""
+        return {
+            "version_string": str(self.version),
+            "is_dse": self.version.is_dse,
+            "major": self.version.major,
+            "minor": self.version.minor,
+            "patch": self.version.patch,
+            "supports_ports": self.should_use_port_in_endpoints(),
+            "deprecated_methods": self.get_deprecated_methods(),
+            "application_states": self.get_application_states(),
+            "features": {
+                "ssl_debug": self.supports_ssl_debug(),
+                "audit_logging": self.supports_audit_logging(),
+                "full_query_logging": self.supports_full_query_logging(),
+                "cidr_filtering": self.supports_cidr_filtering()
+            }
+        }
+
+def detect_cassandra_version(storage_proxy) -> CassandraVersion:
+    """Detect the Cassandra/DSE version from the running instance."""
+    # First try to get the git SHA which often contains DSE information
+    try:
+        git_sha = storage_proxy.getGitSHA()
+        if git_sha:
+            # Look for DSE patterns in git SHA
+            dse_patterns = [
+                r'DSE[-\s](\d+\.\d+\.\d+)',  # DSE 6.9.2
+                r'DSE(\d+\.\d+\.\d+)',       # DSE6.9.2
+                r'dse[-\s](\d+\.\d+\.\d+)',  # dse 6.9.2
+                r'dse(\d+\.\d+\.\d+)'        # dse6.9.2
+            ]
+            
+            for pattern in dse_patterns:
+                match = re.search(pattern, git_sha, re.IGNORECASE)
+                if match:
+                    dse_version = match.group(1)
+                    return CassandraVersion(f"DSE {dse_version}")
+    except Exception as e:
+        # Git SHA method might not exist, continue with release version
+        pass
+    
+    # Try to get the release version
+    try:
+        release_version = storage_proxy.getReleaseVersion()
+        if release_version:
+            # Convert Java String to Python string if needed
+            if hasattr(release_version, 'toString'):
+                release_version = str(release_version)
+            
+            # Check if this looks like a DSE version (contains dots and might end with DSE build number)
+            # DSE versions follow these patterns:
+            # DSE 6.9.x: 4.0.0.69x
+            # DSE 6.8.x: 4.0.0.68x  
+            # DSE 5.1.x: 3.11.3.51x
+            if '.' in release_version and len(release_version.split('.')) >= 4:
+                parts = release_version.split('.')
+                build_number = parts[-1]  # Last part is the DSE build number
+                
+                if build_number.isdigit():
+                    build_int = int(build_number)
+                    
+                    # DSE 6.9.x: 69x (690-699)
+                    if build_int >= 690 and build_int <= 699:
+                        patch = build_int - 690
+                        return CassandraVersion(f"DSE 6.9.{patch}")
+                    
+                    # DSE 6.8.x: 68x (680-689)
+                    elif build_int >= 680 and build_int <= 689:
+                        patch = build_int - 680
+                        return CassandraVersion(f"DSE 6.8.{patch}")
+                    
+                    # DSE 5.1.x: 51xx (5100-5199)
+                    elif build_int >= 5100 and build_int <= 5199:
+                        patch = build_int - 5100
+                        return CassandraVersion(f"DSE 5.1.{patch}")
+                    
+                    # DSE 6.8.x: 68xx (6800-6899) - alternative format
+                    elif build_int >= 6800 and build_int <= 6899:
+                        patch = build_int - 6800
+                        return CassandraVersion(f"DSE 6.8.{patch}")
+            
+            # If it doesn't look like DSE, treat as regular Cassandra
+            return CassandraVersion(release_version)
+    except Exception as e:
+        pass
+    
+    # Fallback to a default version
+    return CassandraVersion("5.0.0")
+
 def find_cassandra_jars(cassandra_home: str, debug: bool = False) -> List[str]:
     """Find all necessary Cassandra JAR files."""
     # Expand home directory and environment variables
@@ -100,7 +367,8 @@ class InteractiveNodetool(cmd2.Cmd):
         self.port = port
         self.prompt = 'interactive-nodetool> '
         self.intro = f'Welcome to Interactive Nodetool. Connected to {host}:{port}\n' \
-                    f'Type "help" for a list of commands.'
+                    f'Type "help" for a list of commands.\n' \
+                    f'This tool supports Cassandra 4.0+, 4.1+, 5.0+ and DSE 5.1+, 6.8+, 6.9+'
         
         # Remove some default cmd2 commands we don't need
         del cmd2.Cmd.do_edit
@@ -313,8 +581,16 @@ class InteractiveNodetool(cmd2.Cmd):
                 False
             )
             
+            # Detect Cassandra/DSE version and initialize compatibility layer
+            self.cassandra_version = detect_cassandra_version(self.storage_proxy)
+            self.version_compat = VersionCompatibility(self.cassandra_version)
+            self.version_compat.debug = self.debug
+            
             if debug:
                 print("Successfully connected to Cassandra via JMX")
+                print(f"Detected version: {self.cassandra_version}")
+                version_info = self.version_compat.get_version_info()
+                print(f"Version info: {version_info}")
         except Exception as e:
             if hasattr(self, 'jmx_connector'):
                 self.jmx_connector.close()
@@ -353,13 +629,47 @@ class InteractiveNodetool(cmd2.Cmd):
     def do_status(self, _):
         """Show cluster status."""
         try:
-            # Get all the required information
-            nodes_status = self.storage_proxy.getLoadMap()
-            token_map = self.storage_proxy.getTokenToEndpointMap()
-            live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes())
-            joining_nodes = set(str(node) for node in self.storage_proxy.getJoiningNodes())
-            leaving_nodes = set(str(node) for node in self.storage_proxy.getLeavingNodes())
-            moving_nodes = set(str(node) for node in self.storage_proxy.getMovingNodes())
+            # Get all the required information using version-compatible methods
+            use_ports = self.version_compat.should_use_port_in_endpoints()
+            supports_boolean_params = self.version_compat.supports_boolean_parameter_methods()
+            
+            # Try to use the newer methods with boolean parameter first
+            try:
+                if supports_boolean_params:
+                    if use_ports:
+                        nodes_status = self.storage_proxy.getLoadMap(True)  # with ports
+                        token_map = self.storage_proxy.getTokenToEndpointMap(True)  # with ports
+                        live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes(True))  # with ports
+                        joining_nodes = set(str(node) for node in self.storage_proxy.getJoiningNodes(True))  # with ports
+                        leaving_nodes = set(str(node) for node in self.storage_proxy.getLeavingNodes(True))  # with ports
+                        moving_nodes = set(str(node) for node in self.storage_proxy.getMovingNodes(True))  # with ports
+                    else:
+                        nodes_status = self.storage_proxy.getLoadMap(False)  # without ports
+                        token_map = self.storage_proxy.getTokenToEndpointMap(False)  # without ports
+                        live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes(False))  # without ports
+                        joining_nodes = set(str(node) for node in self.storage_proxy.getJoiningNodes(False))  # without ports
+                        leaving_nodes = set(str(node) for node in self.storage_proxy.getLeavingNodes(False))  # without ports
+                        moving_nodes = set(str(node) for node in self.storage_proxy.getMovingNodes(False))  # without ports
+                else:
+                    # Use older methods without boolean parameter
+                    if self.debug:
+                        print("Using older methods (pre-4.0 compatibility)")
+                    nodes_status = self.storage_proxy.getLoadMap()
+                    token_map = self.storage_proxy.getTokenToEndpointMap()
+                    live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes())
+                    joining_nodes = set(str(node) for node in self.storage_proxy.getJoiningNodes())
+                    leaving_nodes = set(str(node) for node in self.storage_proxy.getLeavingNodes())
+                    moving_nodes = set(str(node) for node in self.storage_proxy.getMovingNodes())
+            except Exception as e:
+                # Fallback to older methods without boolean parameter
+                if self.debug:
+                    print(f"Falling back to older methods due to error: {e}")
+                nodes_status = self.storage_proxy.getLoadMap()
+                token_map = self.storage_proxy.getTokenToEndpointMap()
+                live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes())
+                joining_nodes = set(str(node) for node in self.storage_proxy.getJoiningNodes())
+                leaving_nodes = set(str(node) for node in self.storage_proxy.getLeavingNodes())
+                moving_nodes = set(str(node) for node in self.storage_proxy.getMovingNodes())
             
             # Get Host ID map (endpoint -> hostId)
             host_id_map = {}
@@ -433,7 +743,7 @@ class InteractiveNodetool(cmd2.Cmd):
                     _, rack = endpoint_snitches.get(endpoint, ("datacenter1", "rack1"))
                     
                     # Print the line with proper spacing
-                    print(f"{status}{state}  {endpoint:<11} {load:<11} {tokens:<7} {ownership:<16} {host_id:<37} {rack}")
+                    print(f"{status}{state}  {endpoint:<12} {load:<11} {tokens:<7} {ownership:<17} {host_id:<37} {rack}")
             
             return False
         except Exception as e:
@@ -913,81 +1223,30 @@ class InteractiveNodetool(cmd2.Cmd):
         try:
             from javax.management import ObjectName
             
-            # Get live nodes and their information
-            live_nodes = set(str(node) for node in self.storage_proxy.getLiveNodes())
-            token_map = self.storage_proxy.getTokenToEndpointMap()
-            load_map = self.storage_proxy.getLoadMap()
+            # Get the actual gossip information from the FailureDetector MBean
+            failure_detector_name = self.version_compat.get_failure_detector_mbean_name()
+            failure_detector = ObjectName(failure_detector_name)
             
-            # Get unique endpoints
-            unique_endpoints = set(str(endpoint) for endpoint in token_map.values())
+            # Get the correct method name for this version
+            gossip_method = self.version_compat.get_gossip_info_method()
             
-            # Get endpoint information
-            for endpoint_str in sorted(unique_endpoints):
-                print(f"{endpoint_str}")
-                
-                # Get generation number (using current time as fallback)
-                import time
-                generation = int(time.time() * 1000)  # Current time in milliseconds
-                print(f"  generation:{generation}")
-                
-                # Get heartbeat (incrementing number)
-                heartbeat = self.storage_proxy.getCurrentGenerationNumber()
-                print(f"  heartbeat:{heartbeat}")
-                
-                # Print status
-                status = "NORMAL" if endpoint_str in live_nodes else "DOWN"
-                status_version = 19  # Common version number for status
-                print(f"  STATUS:{status_version}:{status}")
-                
-                # Print load
-                load = str(load_map.get(endpoint_str)) if endpoint_str in load_map else "0"
-                load_version = 5914  # Version number from example
-                print(f"  LOAD:{load_version}:{load}")
-                
-                # Get schema version
-                try:
-                    schema_version = str(self.storage_proxy.getSchemaVersion())
-                    schema_version_num = 13  # Version number from example
-                    print(f"  SCHEMA:{schema_version_num}:{schema_version}")
-                except:
-                    pass
-                
-                # Get DC and rack information
-                try:
-                    dc = str(self.storage_proxy.getEndpointSnitchInfoProxy().getDatacenter(endpoint_str))
-                    rack = str(self.storage_proxy.getEndpointSnitchInfoProxy().getRack(endpoint_str))
-                    print(f"  DC:9:{dc}")
-                    print(f"  RACK:11:{rack}")
-                except:
-                    print("  DC:9:datacenter1")
-                    print("  RACK:11:rack1")
-                
-                # Get release version
-                release_version = self.storage_proxy.getReleaseVersion()
-                print(f"  RELEASE_VERSION:6:{release_version}")
-                
-                # Print RPC information
-                print(f"  RPC_ADDRESS:5:{endpoint_str}")
-                print(f"  NET_VERSION:2:12")
-                
-                # Get host ID
-                try:
-                    host_id = str(self.storage_proxy.getHostId(endpoint_str))
-                    print(f"  HOST_ID:3:{host_id}")
-                except:
-                    pass
-                
-                # Print additional information
-                print("  RPC_READY:21:true")
-                print(f"  NATIVE_ADDRESS_AND_PORT:4:{endpoint_str}:9042")
-                print(f"  STATUS_WITH_PORT:18:{status}")
-                print("  SSTABLE_VERSIONS:7:big-nb")
-                print("  TOKENS:17:<hidden>")
-                
-                print()  # Empty line between endpoints
+            if self.debug:
+                print(f"Using MBean: {failure_detector_name}")
+                print(f"Using method: {gossip_method}")
+            
+            # Get the raw gossip info string - this is what the original nodetool uses
+            gossip_info = self.mbean_connection.getAttribute(failure_detector, gossip_method)
+            
+            if gossip_info:
+                print(gossip_info)
+            else:
+                print("No gossip information available")
                 
         except Exception as e:
             print(f"Error getting gossip info: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
 
     def do_describecluster(self, _):
         """Show the cluster information."""
@@ -1092,6 +1351,61 @@ class InteractiveNodetool(cmd2.Cmd):
             print(f"Cassandra version: {version}")
         except Exception as e:
             print(f"Error getting version: {e}")
+        return False
+
+    def do_versioninfo(self, _):
+        """Print detailed version and compatibility information."""
+        try:
+            print(f"Detected Version: {self.cassandra_version}")
+            print(f"Is DSE: {self.cassandra_version.is_dse}")
+            print(f"Major: {self.cassandra_version.major}")
+            print(f"Minor: {self.cassandra_version.minor}")
+            print(f"Patch: {self.cassandra_version.patch}")
+            
+            version_info = self.version_compat.get_version_info()
+            
+            print(f"\nCompatibility Features:")
+            print(f"  Supports ports in endpoints: {version_info['supports_ports']}")
+            print(f"  SSL debugging supported: {version_info['features']['ssl_debug']}")
+            print(f"  Audit logging supported: {version_info['features']['audit_logging']}")
+            print(f"  Full query logging supported: {version_info['features']['full_query_logging']}")
+            print(f"  CIDR filtering supported: {version_info['features']['cidr_filtering']}")
+            
+            print(f"\nAvailable Application States:")
+            for state in version_info['application_states']:
+                print(f"  - {state}")
+            
+            if version_info['deprecated_methods']:
+                print(f"\nDeprecated Methods in this version:")
+                for method in version_info['deprecated_methods']:
+                    print(f"  - {method}")
+            
+            print(f"\nDefault Ports:")
+            print(f"  JMX: {self.version_compat.get_default_jmx_port()}")
+            print(f"  Native Transport: {self.version_compat.get_default_native_port()}")
+            print(f"  Storage: {self.version_compat.get_default_storage_port()}")
+            
+            # Show DSE-specific information if applicable
+            if self.cassandra_version.is_dse:
+                print(f"\nDSE-Specific Information:")
+                print(f"  This is a DataStax Enterprise installation")
+                print(f"  DSE version: {self.cassandra_version}")
+                
+                # Try to get DSE-specific metrics if available
+                try:
+                    dse_patterns = self.version_compat.get_metrics_patterns()
+                    if 'dse_metrics' in dse_patterns:
+                        print(f"  DSE metrics available: Yes")
+                    if 'search_metrics' in dse_patterns:
+                        print(f"  Search metrics available: Yes")
+                except:
+                    print(f"  DSE metrics: Unable to determine")
+            
+        except Exception as e:
+            print(f"Error getting version info: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
         return False
 
     # Shortcut for version
@@ -1246,9 +1560,11 @@ class InteractiveNodetool(cmd2.Cmd):
                 print(f"Keyspace: {keyspace}")
                 ks_stats = stats[keyspace]
                 print(f"\tRead Count: {ks_stats['read_count']}")
-                print(f"\tRead Latency: {'NaN' if ks_stats['read_count'] == 0 else f'{ks_stats['read_latency']:.4f}'} ms")
+                read_latency_str = 'NaN' if ks_stats['read_count'] == 0 else f"{ks_stats['read_latency']:.4f}"
+                print(f"\tRead Latency: {read_latency_str} ms")
                 print(f"\tWrite Count: {ks_stats['write_count']}")
-                print(f"\tWrite Latency: {'NaN' if ks_stats['write_count'] == 0 else f'{ks_stats['write_latency']:.4f}'} ms")
+                write_latency_str = 'NaN' if ks_stats['write_count'] == 0 else f"{ks_stats['write_latency']:.4f}"
+                print(f"\tWrite Latency: {write_latency_str} ms")
                 print(f"\tPending Flushes: {sum(table.get('PendingFlushes', 0) for table in ks_stats['tables'].values())}")
                 
                 first_table = True
@@ -1285,9 +1601,11 @@ class InteractiveNodetool(cmd2.Cmd):
                     local_write_latency = write_metrics.get('Mean', float('nan'))
                     
                     print(f"\t\tLocal read count: {local_read_count}")
-                    print(f"\t\tLocal read latency: {'NaN' if local_read_count == 0 else f'{local_read_latency:.4f}'} ms")
+                    local_read_latency_str = 'NaN' if local_read_count == 0 else f"{local_read_latency:.4f}"
+                    print(f"\t\tLocal read latency: {local_read_latency_str} ms")
                     print(f"\t\tLocal write count: {local_write_count}")
-                    print(f"\t\tLocal write latency: {'NaN' if local_write_count == 0 else f'{local_write_latency:.4f}'} ms")
+                    local_write_latency_str = 'NaN' if local_write_count == 0 else f"{local_write_latency:.4f}"
+                    print(f"\t\tLocal write latency: {local_write_latency_str} ms")
                     print(f"\t\tLocal read/write ratio: {0.0 if local_write_count == 0 else local_read_count/local_write_count:.5f}")
                     
                     print(f"\t\tPending flushes: {metrics.get('PendingFlushes', 0)}")
@@ -1809,6 +2127,250 @@ class InteractiveNodetool(cmd2.Cmd):
     def do_n(self, args):
         """Shortcut for netstats command."""
         return self.do_netstats(args)
+
+    def do_dseinfo(self, _):
+        """Print DSE-specific information (only available for DSE installations)."""
+        try:
+            if not self.cassandra_version.is_dse:
+                print("This command is only available for DataStax Enterprise (DSE) installations.")
+                print(f"Current installation appears to be: {self.cassandra_version}")
+                return False
+            
+            print(f"DSE Version: {self.cassandra_version}")
+            print(f"Based on Cassandra: {self.cassandra_version.major}.{self.cassandra_version.minor}.{self.cassandra_version.patch}")
+            
+            # Try to get DSE-specific MBeans
+            from javax.management import ObjectName
+            
+            # Check for DSE Analytics
+            try:
+                analytics_mbean = ObjectName("com.datastax.bdp:type=Analytics")
+                if self.mbean_connection.isRegistered(analytics_mbean):
+                    print("\nDSE Analytics:")
+                    print("  Status: Available")
+                    # Add more analytics-specific information here
+                else:
+                    print("\nDSE Analytics:")
+                    print("  Status: Not available")
+            except:
+                print("\nDSE Analytics:")
+                print("  Status: Unable to determine")
+            
+            # Check for DSE Search
+            try:
+                search_mbean = ObjectName("com.datastax.bdp.search:type=SearchService")
+                if self.mbean_connection.isRegistered(search_mbean):
+                    print("\nDSE Search:")
+                    print("  Status: Available")
+                    # Add more search-specific information here
+                else:
+                    print("\nDSE Search:")
+                    print("  Status: Not available")
+            except:
+                print("\nDSE Search:")
+                print("  Status: Unable to determine")
+            
+            # Check for DSE Graph
+            try:
+                graph_mbean = ObjectName("com.datastax.bdp:type=Graph")
+                if self.mbean_connection.isRegistered(graph_mbean):
+                    print("\nDSE Graph:")
+                    print("  Status: Available")
+                    # Add more graph-specific information here
+                else:
+                    print("\nDSE Graph:")
+                    print("  Status: Not available")
+            except:
+                print("\nDSE Graph:")
+                print("  Status: Unable to determine")
+            
+            # Check for DSE Insights
+            try:
+                insights_mbean = ObjectName("com.datastax.bdp:type=Insights")
+                if self.mbean_connection.isRegistered(insights_mbean):
+                    print("\nDSE Insights:")
+                    print("  Status: Available")
+                    # Add more insights-specific information here
+                else:
+                    print("\nDSE Insights:")
+                    print("  Status: Not available")
+            except:
+                print("\nDSE Insights:")
+                print("  Status: Unable to determine")
+            
+            print(f"\nFor more detailed DSE information, use the 'versioninfo' command.")
+            
+        except Exception as e:
+            print(f"Error getting DSE info: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+        return False
+
+    # Shortcut for version
+    def do_v(self, args):
+        """Shortcut for version command."""
+        return self.do_version(args)
+
+    def do_compatibility(self, _):
+        """Show compatibility warnings and recommendations for the current version."""
+        try:
+            print(f"Compatibility Analysis for {self.cassandra_version}")
+            print("=" * 50)
+            
+            version_info = self.version_compat.get_version_info()
+            
+            # Check for deprecated methods
+            deprecated_methods = version_info['deprecated_methods']
+            if deprecated_methods:
+                print("\n⚠️  DEPRECATED METHODS:")
+                print("The following methods are deprecated in this version:")
+                for method in deprecated_methods:
+                    print(f"  - {method}")
+                print("These methods may be removed in future versions.")
+            
+            # Check for missing features
+            missing_features = []
+            if not version_info['features']['ssl_debug']:
+                missing_features.append("SSL debugging")
+            if not version_info['features']['audit_logging']:
+                missing_features.append("Audit logging")
+            if not version_info['features']['full_query_logging']:
+                missing_features.append("Full query logging")
+            if not version_info['features']['cidr_filtering']:
+                missing_features.append("CIDR filtering")
+            
+            if missing_features:
+                print(f"\n⚠️  MISSING FEATURES:")
+                print("The following features are not available in this version:")
+                for feature in missing_features:
+                    print(f"  - {feature}")
+            
+            # Version-specific recommendations
+            print(f"\n📋 RECOMMENDATIONS:")
+            
+            if self.cassandra_version.is_dse:
+                print("  - This is a DSE installation - use 'dseinfo' for DSE-specific information")
+                print("  - DSE includes additional features like Analytics, Search, and Graph")
+            
+            if self.cassandra_version.is_at_least(5, 0):
+                print("  - This is a recent version with all modern features")
+                print("  - CIDR filtering and disk usage metrics are available")
+            elif self.cassandra_version.is_at_least(4, 0):
+                print("  - This version supports ports in endpoints and modern gossip states")
+                print("  - Consider upgrading to 5.0+ for additional features")
+            else:
+                print("  - This is an older version - consider upgrading for better compatibility")
+                print("  - Some features may not work as expected")
+            
+            # Check for potential issues
+            print(f"\n🔍 POTENTIAL ISSUES:")
+            
+            if not version_info['supports_ports']:
+                print("  - Endpoints do not include ports (older version)")
+                print("  - Some commands may show different endpoint formats")
+            
+            if self.cassandra_version.is_dse and self.cassandra_version.major < 6:
+                print("  - DSE version is older - some DSE features may not be available")
+            
+            print(f"\n✅ COMPATIBILITY STATUS:")
+            if self.cassandra_version.is_at_least(4, 0):
+                print("  - Fully compatible with this tool")
+            else:
+                print("  - Limited compatibility - some features may not work")
+            
+        except Exception as e:
+            print(f"Error analyzing compatibility: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+        return False
+
+    # Shortcut for version
+    def do_v(self, args):
+        """Shortcut for version command."""
+        return self.do_version(args)
+
+    def do_debugversion(self, _):
+        """Debug version detection by showing raw version information."""
+        try:
+            print("=== Version Detection Debug Information ===")
+            
+            # Get raw version information
+            try:
+                release_version = self.storage_proxy.getReleaseVersion()
+                print(f"Raw Release Version: {release_version}")
+                print(f"Type: {type(release_version)}")
+            except Exception as e:
+                print(f"Error getting release version: {e}")
+            
+            try:
+                git_sha = self.storage_proxy.getGitSHA()
+                print(f"Raw Git SHA: {git_sha}")
+                print(f"Type: {type(git_sha)}")
+            except Exception as e:
+                print(f"Error getting git SHA: {e}")
+            
+            # Show what we detected
+            print(f"\nDetected Version: {self.cassandra_version}")
+            print(f"Is DSE: {self.cassandra_version.is_dse}")
+            print(f"Major: {self.cassandra_version.major}")
+            print(f"Minor: {self.cassandra_version.minor}")
+            print(f"Patch: {self.cassandra_version.patch}")
+            
+            # Show version parsing details
+            if self.cassandra_version.is_dse:
+                print(f"\nDSE Version Analysis:")
+                if hasattr(self.cassandra_version, 'version_string'):
+                    print(f"  Version String: {self.cassandra_version.version_string}")
+                
+                # Try to parse the release version for DSE patterns
+                try:
+                    release_version = self.storage_proxy.getReleaseVersion()
+                    if release_version and '.' in release_version:
+                        parts = release_version.split('.')
+                        print(f"  Release Version Parts: {parts}")
+                        if len(parts) >= 4:
+                            build_number = parts[-1]
+                            print(f"  Build Number: {build_number}")
+                            if build_number.isdigit():
+                                build_int = int(build_number)
+                                print(f"  Build Integer: {build_int}")
+                                
+                                # Show what DSE version this would map to
+                                if build_int >= 5100 and build_int <= 5199:
+                                    patch = build_int - 5100
+                                    print(f"  Would map to: DSE 5.1.{patch}")
+                                elif build_int >= 680 and build_int <= 689:
+                                    patch = build_int - 680
+                                    print(f"  Would map to: DSE 6.8.{patch}")
+                                elif build_int >= 6800 and build_int <= 6899:
+                                    patch = build_int - 6800
+                                    print(f"  Would map to: DSE 6.8.{patch}")
+                                elif build_int >= 690 and build_int <= 699:
+                                    patch = build_int - 690
+                                    print(f"  Would map to: DSE 6.9.{patch}")
+                                elif build_int >= 600 and build_int < 1000:
+                                    major = build_int // 100
+                                    minor = build_int % 100
+                                    print(f"  Would map to: DSE 6.{major}.{minor}")
+                except Exception as e:
+                    print(f"  Error analyzing release version: {e}")
+            
+            # Show compatibility info
+            print(f"\nCompatibility Information:")
+            version_info = self.version_compat.get_version_info()
+            print(f"  Supports ports: {version_info['supports_ports']}")
+            print(f"  Supports boolean params: {self.version_compat.supports_boolean_parameter_methods()}")
+            
+        except Exception as e:
+            print(f"Error in debug version: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+        return False
+
+    # Shortcut for version
 
 def read_config_file(config_file: str) -> Dict[str, str]:
     """Read configuration from file and return as a dictionary.
